@@ -1,3 +1,7 @@
+use std::fmt::{Display, Write};
+
+use crate::tokenizer::Span;
+
 pub trait StrExt {
 	fn char_at(&self, index: usize) -> Option<char>;
 	fn find_after(&self, pat: char, index: usize) -> Option<usize>;
@@ -15,18 +19,17 @@ impl StrExt for str {
 	}
 }
 
-use std::fmt::{Display, Write};
-
-use crate::tokenizer::Span;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
 	pub msg: Box<str>,
 	pub span: Span,
 }
 impl Error {
 	pub fn new(mut msg: String, span: Span, at: &str) -> Self {
-		write!(msg, "\n  --> {at}:{span}").unwrap();
+		write!(msg, "\n  --> {at}").unwrap();
+		if !span.is_none() {
+			write!(msg, ":{span}").unwrap()
+		}
 		Self { msg: msg.into_boxed_str(), span }
 	}
 }
