@@ -19,7 +19,7 @@ impl Ident {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Path {
-	pub seqments: Vec<Ident>,
+	pub segments: Vec<Ident>,
 	pub span: Span,
 }
 
@@ -123,11 +123,7 @@ impl<'a> Cursor<'a> {
 		Cursor { tokens, ind: Cell::new(0), src_path }
 	}
 	pub fn is_end(&self) -> bool {
-		self.ind.get() >= self.tokens.len()
-	}
-	pub fn back(&self) {
-		debug_assert!(self.ind.get() > 0);
-		self.ind.set(self.ind.get() - 1);
+		self.ind.get() >= self.tokens.len() - 1
 	}
 	pub fn last(&self) -> &Token<'a> {
 		debug_assert!(self.ind.get() > 0);
@@ -204,7 +200,7 @@ fn parse_path<'a>(cur: &Cursor<'a>) -> Result<Path, Error> {
 		path.push(cur.consume_ident()?);
 	}
 	let span = start_span.join(path.last().unwrap().span);
-	Ok(Path { seqments: path, span })
+	Ok(Path { segments: path, span })
 }
 fn parse_delim_list<T>(
 	cur: &Cursor, start: TokenKind, end: TokenKind, sep: TokenKind,
@@ -213,9 +209,9 @@ fn parse_delim_list<T>(
 	let mut items = Vec::new();
 	cur.consume(start)?;
 
-	if !cur.test(end.clone()) {
+	if !cur.test(end) {
 		items.push(item_parser(cur)?);
-		while cur.try_eat(sep.clone()) && !cur.test(end.clone()) {
+		while cur.try_eat(sep) && !cur.test(end) {
 			items.push(item_parser(cur)?);
 		}
 	}
@@ -300,14 +296,13 @@ fn parse_pat(cur: &Cursor) -> Result<Pat, Error> {
 	}
 	let mut pats = vec![pat];
 	while cur.try_eat(Or) {
-		pats.push(parse_pat(cur)?);
+		pats.push(parse_pat_primary(cur)?);
 	}
 	let span = start_span.join(cur.last().span);
 	Ok(Pat { kind: PatKind::Or(pats), span })
 }
 
 fn parse_expr_obj(cur: &Cursor) -> Result<Expr, Error> {
-	cur.back();
 	let start_span = cur.peek().span;
 	let items = parse_delim_list(cur, BraceOpen, BraceClose, Comma, |cur| {
 		if cur.try_eat(Dot) {
@@ -415,7 +410,7 @@ fn parse_import(cur: &Cursor) -> Result<Import, Error> {
 fn parse_symbol(cur: &Cursor, symbols: &mut Vec<Symbol>) -> Result<(), Error> {
 	loop {
 		let name = cur.consume_ident()?;
-		if cur.test(Colon) {
+		if cur.test(BraceOpen) {
 			let items = parse_delim_list(cur, BraceOpen, BraceClose, Comma, |cur| {
 				return cur.consume_ident();
 			})?;

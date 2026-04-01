@@ -14,13 +14,13 @@ impl Span {
 		Span { start, end }
 	}
 	pub fn point(loc: (u16, u16)) -> Span {
-		Span { start: loc, end: (loc.0, loc.1 + 1) }
+		Span { start: loc, end: (loc.0, loc.1) }
 	}
 	pub fn none() -> Span {
 		Span { start: (0, 0), end: (0, 0) }
 	}
 	pub fn is_point(&self) -> bool {
-		self.start.0 == self.end.0 && self.start.1 + 1 == self.end.1
+		self.start.0 == self.end.0 && self.start.1 == self.end.1
 	}
 	pub fn is_none(&self) -> bool {
 		*self == Span::none()
@@ -63,7 +63,7 @@ pub struct Token<'a> {
 	pub kind: TokenKind<'a>,
 	pub span: Span,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub enum TokenKind<'a> {
 	Ident(&'a str),
 	Dot,
@@ -165,7 +165,7 @@ pub fn tokenize<'a>(source: &'a str, file: &str) -> Result<Vec<Token<'a>>, Error
 				if source.char_at(ind + 1) == Some($sec_char) {
 					tokens.push(Token {
 						kind: $couple,
-						span: Span::new(cur_pos, (cur_pos.0, cur_pos.1 + 2)),
+						span: Span::new(cur_pos, (cur_pos.0, cur_pos.1 + 1)),
 					});
 					cur_pos.1 += 2;
 					ind += 2;
@@ -219,7 +219,7 @@ pub fn tokenize<'a>(source: &'a str, file: &str) -> Result<Vec<Token<'a>>, Error
 				let Some((ident, char_count)) = match_symbol(source, ind) else {
 					return unexpected_token(cur_char, "", Span::point(cur_pos), file);
 				};
-				let span = Span::new(cur_pos, (cur_pos.0, cur_pos.1 + char_count));
+				let span = Span::new(cur_pos, (cur_pos.0, cur_pos.1 + char_count - 1));
 				let kind = match ident {
 					"_" => Kind::Dash,
 					"let" => Kind::Let,
