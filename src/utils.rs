@@ -38,3 +38,9 @@ impl Display for Error {
 		write!(f, "{}", self.msg)
 	}
 }
+macro_rules! err {
+	($msg:expr, ($span:expr, $at:expr)) => {
+		Err(crate::utils::Error::new(format!($msg), $span, $at))
+	};
+}
+pub(crate) use err;

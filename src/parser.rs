@@ -1,14 +1,14 @@
-use compact_str::CompactString;
+use compact_str::{CompactString, CompactStringExt};
 
 use crate::{
 	tokenizer::{Span, Token, TokenKind, end_of_input, tokenize, unexpected_token},
-	utils::Error,
+	utils::{Error, err},
 };
-use std::cell::Cell;
+use std::{cell::Cell, fmt::Display};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ident {
-	pub name: CompactString,
+	pub val: CompactString,
 	pub span: Span,
 }
 impl Ident {
@@ -16,11 +16,32 @@ impl Ident {
 		Expr { span: self.span, kind: ExprKind::Ident(self) }
 	}
 }
+impl Display for Ident {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", self.val)
+	}
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Path {
 	pub segments: Vec<Ident>,
 	pub span: Span,
+}
+impl Path {
+	pub fn display(segments: &[Ident]) -> String {
+		segments.iter().map(|v| &v.val).join_compact(".").to_string()
+	}
+	pub fn last(&self) -> &Ident {
+		self.segments.last().unwrap()
+	}
+	pub fn root() -> Path {
+		Path { segments: vec![], span: Span::none() }
+	}
+}
+impl Display for Path {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", Path::display(&self.segments))
+	}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,9 +109,14 @@ pub struct Import {
 	pub items: Vec<Ident>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Symbol {
-	Ident(Ident),
-	Enum { name: Ident, items: Vec<Ident> },
+pub struct Symbol {
+	pub name: Ident,
+	pub kind: SymbolKind,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymbolKind {
+	Atom,
+	Enum(Vec<Ident>),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Const {
@@ -106,6 +132,7 @@ pub struct Fn {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct File {
+	pub path: String,
 	pub imports: Vec<Import>,
 	pub symbols: Vec<Symbol>,
 	pub consts: Vec<Const>,
@@ -138,6 +165,9 @@ impl<'a> Cursor<'a> {
 	pub fn test(&self, kind: TokenKind) -> bool {
 		self.peek().kind == kind
 	}
+	pub fn span_from(&self, start: Span) -> Span {
+		start.join(self.last().span)
+	}
 	pub fn consume(&self, kind: TokenKind) -> Result<Span, Error> {
 		if self.is_end() {
 			return end_of_input(&format!("({kind})"), self.src_path);
@@ -166,7 +196,7 @@ impl<'a> Cursor<'a> {
 	pub fn try_consume_ident(&self) -> Option<Ident> {
 		if let Token { kind: TokenKind::Ident(ident), span } = self.peek() {
 			self.skip();
-			return Some(Ident { name: CompactString::new(ident), span: *span });
+			return Some(Ident { val: CompactString::new(ident), span: *span });
 		}
 		None
 	}
@@ -248,8 +278,7 @@ fn parse_pat_obj(cur: &Cursor) -> Result<Pat, Error> {
 			Ok(FieldPat::Key(field, pat))
 		}
 	})?;
-	let span = start_span.join(cur.last().span);
-	Ok(Pat { span, kind: PatKind::Object(items) })
+	Ok(Pat { span: cur.span_from(start_span), kind: PatKind::Object(items) })
 }
 fn parse_pat_primary(cur: &Cursor) -> Result<Pat, Error> {
 	if let Some(span) = cur.try_consume(Dash) {
@@ -274,7 +303,7 @@ fn parse_pat_primary(cur: &Cursor) -> Result<Pat, Error> {
 			if let Some(rest_span) = cur.try_consume(Dot) {
 				cur.consume(Dot)?;
 				if cur.test(Comma) || cur.test(BracketClose) {
-					let any = Pat { span: rest_span.join(cur.last().span), kind: PatKind::Any };
+					let any = Pat { span: cur.span_from(rest_span), kind: PatKind::Any };
 					return Ok(ArrItemPat::Rest(any));
 				}
 				Ok(ArrItemPat::Rest(parse_pat(cur)?))
@@ -282,8 +311,7 @@ fn parse_pat_primary(cur: &Cursor) -> Result<Pat, Error> {
 				Ok(ArrItemPat::One(parse_pat(cur)?))
 			}
 		})?;
-		let span = start_span.join(cur.last().span);
-		Ok(Pat { span, kind: PatKind::Array(items) })
+		Ok(Pat { span: cur.span_from(start_span), kind: PatKind::Array(items) })
 	} else {
 		cur.err_expected("a pattern")
 	}
@@ -298,8 +326,7 @@ fn parse_pat(cur: &Cursor) -> Result<Pat, Error> {
 	while cur.try_eat(Or) {
 		pats.push(parse_pat_primary(cur)?);
 	}
-	let span = start_span.join(cur.last().span);
-	Ok(Pat { kind: PatKind::Or(pats), span })
+	Ok(Pat { kind: PatKind::Or(pats), span: cur.span_from(start_span) })
 }
 
 fn parse_expr_obj(cur: &Cursor) -> Result<Expr, Error> {
@@ -326,8 +353,7 @@ fn parse_expr_obj(cur: &Cursor) -> Result<Expr, Error> {
 			Ok(ObjectItem::KeyValue(field, value))
 		}
 	})?;
-	let span = start_span.join(cur.last().span);
-	Ok(Expr { span, kind: ExprKind::Object(items) })
+	Ok(Expr { span: cur.span_from(start_span), kind: ExprKind::Object(items) })
 }
 fn parse_expr_primary(cur: &Cursor) -> Result<Expr, Error> {
 	if let Some(span) = cur.try_consume(Dash) {
@@ -337,8 +363,7 @@ fn parse_expr_primary(cur: &Cursor) -> Result<Expr, Error> {
 			let args = parse_delim_list(cur, ParenOpen, ParenClose, Comma, |cur| {
 				return parse_expr(cur);
 			})?;
-			let span = ident.span.join(cur.last().span);
-			Ok(Expr { span, kind: ExprKind::Call(ident, args) })
+			Ok(Expr { span: cur.span_from(ident.span), kind: ExprKind::Call(ident, args) })
 		} else {
 			Ok(ident.into_expr())
 		}
@@ -354,8 +379,7 @@ fn parse_expr_primary(cur: &Cursor) -> Result<Expr, Error> {
 				Ok(ArrayItem::One(parse_expr(cur)?))
 			}
 		})?;
-		let span = start_span.join(cur.last().span);
-		Ok(Expr { span, kind: ExprKind::Array(items) })
+		Ok(Expr { span: cur.span_from(start_span), kind: ExprKind::Array(items) })
 	} else {
 		cur.err_expected("an expression")
 	}
@@ -371,17 +395,22 @@ fn parse_expr_postfix(cur: &Cursor) -> Result<Expr, Error> {
 			cur.consume(BracketClose)?;
 			ExprKind::Index(Box::new(expr), Box::new(index))
 		} else if cur.try_eat(Colon) {
+			let brace_start = cur.peek().span;
 			let arms = parse_delim_list(cur, BraceOpen, BraceClose, Comma, |cur| {
 				let pat = parse_pat(cur)?;
 				cur.consume(Arrow)?;
 				let map = parse_expr(cur)?;
 				Ok(MatchArm { pat, map })
 			})?;
+			if arms.len() == 0 {
+				let span = cur.span_from(brace_start);
+				return err!("map expression must have at least 1 arm", (span, cur.src_path));
+			}
 			ExprKind::Map(Box::new(expr), arms)
 		} else {
 			break;
 		};
-		expr = Expr { kind, span: start_span.join(cur.last().span) };
+		expr = Expr { kind, span: cur.span_from(start_span) };
 	}
 	Ok(expr)
 }
@@ -395,8 +424,7 @@ fn parse_expr(cur: &Cursor) -> Result<Expr, Error> {
 	while cur.try_eat(Pipe) {
 		exprs.push(parse_expr_postfix(cur)?);
 	}
-	let span = start_span.join(cur.last().span);
-	Ok(Expr { kind: ExprKind::Pipe(exprs), span })
+	Ok(Expr { kind: ExprKind::Pipe(exprs), span: cur.span_from(start_span) })
 }
 
 fn parse_import(cur: &Cursor) -> Result<Import, Error> {
@@ -414,9 +442,9 @@ fn parse_symbol(cur: &Cursor, symbols: &mut Vec<Symbol>) -> Result<(), Error> {
 			let items = parse_delim_list(cur, BraceOpen, BraceClose, Comma, |cur| {
 				return cur.consume_ident();
 			})?;
-			symbols.push(Symbol::Enum { name, items });
+			symbols.push(Symbol { name, kind: SymbolKind::Enum(items) });
 		} else {
-			symbols.push(Symbol::Ident(name));
+			symbols.push(Symbol { name, kind: SymbolKind::Atom });
 		}
 
 		if !cur.try_eat(Comma) {
@@ -446,6 +474,7 @@ pub fn parse_file(source: &str, src_path: &str) -> Result<File, Error> {
 	let tokens = tokenize(source, src_path)?;
 	let cur = Cursor::new(&tokens, src_path);
 	let mut file = File::default();
+	file.path = src_path.to_string();
 
 	while let Some(cur_token) = cur.consume_any() {
 		match cur_token.kind {
@@ -454,8 +483,8 @@ pub fn parse_file(source: &str, src_path: &str) -> Result<File, Error> {
 			Let => file.consts.push(parse_const(&cur)?),
 			Fn => file.fns.push(parse_fn(&cur)?),
 			_ => {
-				let msg = "a top level decleration";
-				return unexpected_token(cur_token, msg, cur_token.span, src_path);
+				let expected = "a top level decleration";
+				return unexpected_token(cur_token, expected, cur_token.span, src_path);
 			}
 		}
 	}

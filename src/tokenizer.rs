@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
 
-use crate::utils::{Error, StrExt};
+use crate::utils::{Error, StrExt, err};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
@@ -44,18 +44,18 @@ impl Display for Span {
 pub fn unexpected_token<T>(
 	token: impl Display, expected: &str, span: Span, file: &str,
 ) -> Result<T, Error> {
-	let msg = match expected {
-		"" => format!("parse error: unexpected token ({token})"),
-		_ => format!("parse error: unexpected token ({token}), expected {expected}"),
-	};
-	Err(Error::new(msg, span, file))
+	match expected {
+		"" => err!("parse error: unexpected token ({token})", (span, file)),
+		_ => err!("parse error: unexpected token ({token}), expected {expected}", (span, file)),
+	}
 }
 pub fn end_of_input<T>(expected: &str, file: &str) -> Result<T, Error> {
-	let msg = match expected {
-		"" => format!("parse error: unexpected end of input"),
-		_ => format!("parse error: unexpected end of input, expected {expected}"),
-	};
-	Err(Error::new(msg, Span::none(), file))
+	match expected {
+		"" => err!("parse error: unexpected end of input", (Span::none(), file)),
+		_ => {
+			err!("parse error: unexpected end of input, expected {expected}", (Span::none(), file))
+		}
+	}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,7 +177,7 @@ pub fn tokenize<'a>(source: &'a str, file: &str) -> Result<Vec<Token<'a>>, Error
 
 		match cur_char {
 			' ' | '\t' | '\r' => {
-				cur_pos.1 += 1;
+				cur_pos.1 += if cur_char == '\t' { 4 } else { 1 };
 				ind += 1
 			}
 			'\n' => {
@@ -205,8 +205,7 @@ pub fn tokenize<'a>(source: &'a str, file: &str) -> Result<Vec<Token<'a>>, Error
 				}
 				Some('*') => {
 					let Some(end) = source.find_after_str("*/", ind + 2) else {
-						let msg = "parse error: unended comment".into();
-						return Err(Error::new(msg, Span::point(cur_pos), file));
+						return err!("parse error: unended comment", (Span::point(cur_pos), file));
 					};
 					update_pos_after(&mut cur_pos, &source[ind..end]);
 					ind = end + 2;
