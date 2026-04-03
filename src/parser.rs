@@ -57,7 +57,8 @@ pub enum ArrItemPat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatKind {
 	Any,
-	Path(Path),
+	Ident(Ident),
+	Enum(Ident, Box<Ident>),
 	Let(Ident, Box<Pat>),
 	Object(Vec<FieldPat>),
 	Array(Vec<ArrItemPat>),
@@ -67,6 +68,14 @@ pub enum PatKind {
 pub struct Pat {
 	pub kind: PatKind,
 	pub span: Span,
+}
+impl Pat {
+	pub fn as_ident(&self) -> Option<&Ident> {
+		match &self.kind {
+			PatKind::Ident(ident) => Some(ident),
+			_ => None,
+		}
+	}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +90,7 @@ pub enum ArrayItem {
 	Rest(Expr),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MatchArm {
+pub struct MapArm {
 	pub pat: Pat,
 	pub map: Expr,
 }
@@ -94,13 +103,21 @@ pub enum ExprKind {
 	Array(Vec<ArrayItem>),
 	Field(Box<Expr>, Ident),
 	Index(Box<Expr>, Box<Expr>),
-	Map(Box<Expr>, Vec<MatchArm>),
+	Map(Box<Expr>, Vec<MapArm>),
 	Pipe(Vec<Expr>),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expr {
-	span: Span,
-	kind: ExprKind,
+	pub span: Span,
+	pub kind: ExprKind,
+}
+impl Expr {
+	pub fn as_ident(&self) -> Option<&Ident> {
+		match &self.kind {
+			ExprKind::Ident(ident) => Some(ident),
+			_ => None,
+		}
+	}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,13 +138,13 @@ pub enum SymbolKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Const {
 	pub name: Ident,
-	pub expr: Expr,
+	pub init: Expr,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fn {
 	pub name: Ident,
 	pub args: Vec<Ident>,
-	pub expr: Expr,
+	pub body: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -283,9 +300,14 @@ fn parse_pat_obj(cur: &Cursor) -> Result<Pat, Error> {
 fn parse_pat_primary(cur: &Cursor) -> Result<Pat, Error> {
 	if let Some(span) = cur.try_consume(Dash) {
 		Ok(Pat { span, kind: PatKind::Any })
-	} else if matches!(cur.peek().kind, Ident(_)) {
-		let path = parse_path(cur)?;
-		Ok(Pat { span: path.span, kind: PatKind::Path(path) })
+	} else if let Some(ident) = cur.try_consume_ident() {
+		if cur.try_eat(Dot) {
+			let var = cur.consume_ident()?;
+			let span = ident.span.join(var.span);
+			Ok(Pat { span, kind: PatKind::Enum(ident, Box::new(var)) })
+		} else {
+			Ok(Pat { span: ident.span, kind: PatKind::Ident(ident) })
+		}
 	} else if let Some(let_span) = cur.try_consume(Let) {
 		let ident = cur.consume_ident()?;
 		let pat = if cur.try_eat(Colon) {
@@ -344,12 +366,8 @@ fn parse_expr_obj(cur: &Cursor) -> Result<Expr, Error> {
 			Ok(ObjectItem::IndexValue(index, value))
 		} else {
 			let field = cur.consume_ident()?;
-			let value = if cur.test(Comma) || cur.test(BraceClose) {
-				field.clone().into_expr()
-			} else {
-				cur.consume(Eq)?;
-				parse_expr(cur)?
-			};
+			cur.consume(Eq)?;
+			let value = parse_expr(cur)?;
 			Ok(ObjectItem::KeyValue(field, value))
 		}
 	})?;
@@ -400,11 +418,13 @@ fn parse_expr_postfix(cur: &Cursor) -> Result<Expr, Error> {
 				let pat = parse_pat(cur)?;
 				cur.consume(Arrow)?;
 				let map = parse_expr(cur)?;
-				Ok(MatchArm { pat, map })
+				Ok(MapArm { pat, map })
 			})?;
 			if arms.len() == 0 {
-				let span = cur.span_from(brace_start);
-				return err!("map expression must have at least 1 arm", (span, cur.src_path));
+				return err!(
+					"parse error: map expression must have at least 1 arm",
+					(cur.span_from(brace_start), cur.src_path)
+				);
 			}
 			ExprKind::Map(Box::new(expr), arms)
 		} else {
@@ -459,7 +479,7 @@ fn parse_const(cur: &Cursor) -> Result<Const, Error> {
 	cur.consume(Eq)?;
 	let expr = parse_expr(cur)?;
 	cur.consume(SemiColon)?;
-	Ok(Const { name, expr })
+	Ok(Const { name, init: expr })
 }
 fn parse_fn(cur: &Cursor) -> Result<Fn, Error> {
 	let name = cur.consume_ident()?;
@@ -467,7 +487,7 @@ fn parse_fn(cur: &Cursor) -> Result<Fn, Error> {
 	cur.consume(Arrow)?;
 	let expr = parse_expr(cur)?;
 	cur.consume(SemiColon)?;
-	Ok(Fn { name, args, expr })
+	Ok(Fn { name, args, body: expr })
 }
 
 pub fn parse_file(source: &str, src_path: &str) -> Result<File, Error> {

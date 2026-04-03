@@ -147,7 +147,7 @@ fn match_symbol(src: &str, start_ind: usize) -> Option<(&str, u16)> {
 	(char_count > 0).then(|| (&src[start_ind..], char_count))
 }
 
-pub fn tokenize<'a>(source: &'a str, file: &str) -> Result<Vec<Token<'a>>, Error> {
+pub fn tokenize<'a>(source: &'a str, src_path: &str) -> Result<Vec<Token<'a>>, Error> {
 	let mut tokens = Vec::new();
 	let mut cur_pos = (1, 1);
 	let mut ind = 0;
@@ -205,18 +205,21 @@ pub fn tokenize<'a>(source: &'a str, file: &str) -> Result<Vec<Token<'a>>, Error
 				}
 				Some('*') => {
 					let Some(end) = source.find_after_str("*/", ind + 2) else {
-						return err!("parse error: unended comment", (Span::point(cur_pos), file));
+						return err!(
+							"parse error: unended comment",
+							(Span::point(cur_pos), src_path)
+						);
 					};
 					update_pos_after(&mut cur_pos, &source[ind..end]);
 					ind = end + 2;
 					cur_pos.1 += 2;
 				}
-				_ => return unexpected_token(cur_char, "", Span::point(cur_pos), file),
+				_ => return unexpected_token(cur_char, "", Span::point(cur_pos), src_path),
 			},
 
 			_ => {
 				let Some((ident, char_count)) = match_symbol(source, ind) else {
-					return unexpected_token(cur_char, "", Span::point(cur_pos), file);
+					return unexpected_token(cur_char, "", Span::point(cur_pos), src_path);
 				};
 				let span = Span::new(cur_pos, (cur_pos.0, cur_pos.1 + char_count - 1));
 				let kind = match ident {
