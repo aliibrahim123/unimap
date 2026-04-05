@@ -3,15 +3,18 @@ use std::collections::HashMap;
 use compact_str::CompactString;
 
 use crate::{
+	exec::{
+		ArrItemPat, ArrayItem, Const, ExecCtx, Expr, ExprId, ExprKind, Field, FieldPat, Fn, ItemId,
+		LocalId, MapArm, ObjectItem, Pat, PatId, PatKind, ScopeId, Stat, Symbol, SymbolKind,
+	},
 	parser::{
 		ArrItemPat as ArrItemPatSrc, ArrayItem as ArrayItemSrc, Const as ConstSrc, Expr as ExprSrc,
-		ExprKind as ExprSrcKind, FieldPat as FieldPatSrc, File as FileSrc, Fn as FnSrc, Ident,
-		Import, MapArm as MapArmSrc, ObjectItem as ObjectItemSrc, Pat as PatSrc,
+		ExprKind as ExprSrcKind, FieldKind, FieldPat as FieldPatSrc, File as FileSrc, Fn as FnSrc,
+		Ident, Import, MapArm as MapArmSrc, ObjectItem as ObjectItemSrc, Pat as PatSrc,
 		PatKind as PatSrcKind, Path, Symbol as SymbolSrc, SymbolKind as SymbolSrcKind, parse_file,
 	},
 	tokenizer::Span,
 	utils::{Error, err},
-	value::Value,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,9 +44,9 @@ impl PathNode {
 			match cur_branch.get(&segment.val) {
 				Some(PathNode::Tree(branch)) => cur_branch = branch,
 				Some(PathNode::Leaf(_)) => {
-					let parent = Path::display(&path.segments[..index]);
+					let parent = Path::display(&path.segments[..=index]);
 					return err!(
-						"resolve error: can not load path \"{path}\" since its parent \"{parent}\" is not a directory",
+						"import error: can not load path \"{path}\" since its parent \"{parent}\" is not a directory",
 						(path.span, src_path)
 					);
 				}
@@ -54,7 +57,7 @@ impl PathNode {
 		match cur_branch.get(&path.last().val) {
 			Some(PathNode::Leaf(file)) => Ok(Some(*file)),
 			Some(PathNode::Tree(_)) => err!(
-				"resolve error: can not load path \"{path}\" since it is a directory",
+				"import error: can not load path \"{path}\" since it is a directory",
 				(path.span, src_path)
 			),
 			None => Ok(None),
@@ -75,23 +78,23 @@ impl PathNode {
 	}
 }
 
+pub type Loader<'a> = &'a dyn std::ops::Fn(&Path, &str) -> Result<LoadResult, Error>;
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoadResult<'a> {
-	pub file: &'a str,
-	pub path: &'a str,
+pub struct LoadResult {
+	pub file: String,
+	pub path: String,
 }
 
 fn load_loop(
-	path: &Path, root: &mut PathTree, files: &mut Vec<FileSrc>,
-	loader: &fn(&Path) -> Result<LoadResult, Error>,
+	path: &Path, root: &mut PathTree, files: &mut Vec<FileSrc>, importer: &str, loader: Loader,
 ) -> Result<(), Error> {
 	PathNode::insert(path, 0, root);
-	let LoadResult { file, path: src_path } = loader(path)?;
-	let file = parse_file(file, src_path)?;
+	let LoadResult { file, path: src_path } = loader(path, importer)?;
+	let file = parse_file(&file, &src_path)?;
 
 	for Import { path, .. } in &file.imports {
-		if PathNode::try_get(path, root, src_path)?.is_none() {
-			load_loop(path, root, files, loader)?
+		if PathNode::try_get(path, root, &src_path)?.is_none() {
+			load_loop(path, root, files, &src_path, loader)?
 		}
 	}
 
@@ -99,59 +102,6 @@ fn load_loop(
 	PathNode::insert(path, id, root);
 	files.push(file);
 	Ok(())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SymbolKind {
-	Atom,
-	Enum(HashMap<CompactString, ItemId>),
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Symbol {
-	pub name: Ident,
-	pub kind: SymbolKind,
-	pub src_path: usize,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConstValue {
-	Uninit,
-	Computing,
-	Computed(Value),
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Const {
-	pub name: Ident,
-	pub init: Stat,
-	pub value: ConstValue,
-	pub src_path: usize,
-}
-impl Const {
-	pub fn new(name: Ident, src_path: usize) -> Self {
-		Self { name, init: Stat::dummy(), value: ConstValue::Uninit, src_path }
-	}
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Fn {
-	pub name: Ident,
-	pub args_count: u16,
-	pub body: Stat,
-	pub src_path: usize,
-}
-impl Fn {
-	pub fn new(name: Ident, args_count: u16, src_path: usize) -> Self {
-		Self { name, args_count, body: Stat::dummy(), src_path }
-	}
-}
-
-// pub type ValueId = u64;
-pub type ItemId = u32;
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ExecCtx {
-	pub file_names: Vec<String>,
-	pub consts: Vec<Const>,
-	pub fns: Vec<Fn>,
-	pub symbols: Vec<Symbol>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
@@ -192,8 +142,14 @@ fn gather(src: &FileSrc, ctx: &mut ExecCtx) -> Result<File, Error> {
 			SymbolSrcKind::Enum(variants) => {
 				let mut map = HashMap::new();
 				for var in variants {
+					if map.contains_key(&var.val) {
+						return err!(
+							"resolve error: variant \"{var}\" is already defined",
+							(var.span, &src.path)
+						);
+					}
 					let id = symbols.len();
-					symbols.push(Symbol { name: name.clone(), kind: SymbolKind::Atom, src_path });
+					symbols.push(Symbol { name: var.clone(), kind: SymbolKind::Atom, src_path });
 					map.insert(var.val.clone(), id as ItemId);
 				}
 				SymbolKind::Enum(map)
@@ -246,91 +202,6 @@ fn resolve_imports(
 	Ok(())
 }
 
-pub type ExprId = u16;
-pub type PatId = u16;
-pub type ScopeId = u16;
-pub type LocalId = u16;
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Expr {
-	pub span: Span,
-	pub kind: ExprKind,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ObjectItem {
-	KeyValue(ItemId, ExprId),
-	IndexValue(ExprId, ExprId),
-	Rest(ExprId),
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ArrayItem {
-	One(ExprId),
-	Rest(ExprId),
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MapArm {
-	pat: PatId,
-	scope_slots: LocalId,
-	expr: ExprId,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExprKind {
-	Cur,
-	Symbol(ItemId),
-	Const(ItemId),
-	Local(ScopeId, LocalId),
-	Call(ItemId, Box<[ExprId]>),
-	Field(ExprId, ItemId),
-	Index(ExprId, ExprId),
-	Object(Box<[ObjectItem]>),
-	Array(Box<[ArrayItem]>),
-	JumpTable(ExprId, Box<HashMap<ItemId, ExprId>>),
-	Map(ExprId, Box<[MapArm]>),
-	Pipe(Box<[ExprId]>),
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Pat {
-	pub span: Span,
-	pub kind: PatKind,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FieldPat {
-	Key(ItemId, PatId),
-	Index(ExprId, PatId),
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ArrItemPat {
-	One(PatId),
-	Rest(PatId),
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PatKind {
-	Any,
-	Symbol(ItemId),
-	Const(ItemId),
-	Local(ScopeId, LocalId),
-	Let(LocalId, PatId),
-	Object(Box<[FieldPat]>),
-	Array(Box<[ArrItemPat]>),
-	Or(Box<[PatId]>),
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Stat {
-	pub exprs: Vec<Expr>,
-	pub pats: Vec<Pat>,
-	pub root_expr: ExprId,
-}
-impl Stat {
-	fn new() -> Self {
-		Self {
-			exprs: vec![Expr { span: Span::none(), kind: ExprKind::Cur }],
-			pats: vec![Pat { span: Span::none(), kind: PatKind::Any }],
-			root_expr: 0,
-		}
-	}
-	fn dummy() -> Self {
-		Self { exprs: Vec::new(), pats: Vec::new(), root_expr: 0 }
-	}
-}
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Scopes<'a> {
 	pub items: &'a ItemScope,
@@ -380,14 +251,12 @@ struct ResolveCtx<'a> {
 	pub exec_ctx: &'a ExecCtx,
 	pub src_path: &'a str,
 }
-fn resolve_field(field: &Ident, ctx: &ResolveCtx) -> Result<ItemId, Error> {
+fn resolve_field(field: &FieldKind, ctx: &ResolveCtx) -> Result<Field, Error> {
 	let ResolveCtx { scopes, src_path, .. } = ctx;
-	if scopes.resolve_local(field).is_some() {
-		return err!(
-			"resolve error: local \"{field}\" can not be used as a field",
-			(field.span, src_path)
-		);
-	}
+	let field = match field {
+		FieldKind::Ident(ident) => ident,
+		FieldKind::Nb(nb) => return Ok(Field::Nb(*nb)),
+	};
 	let (field_type, field_id) = scopes.resolve_item(field, src_path)?;
 	if field_type != ItemType::Symbol {
 		let kind = if field_type == ItemType::Const { "constant" } else { "function" };
@@ -402,7 +271,7 @@ fn resolve_field(field: &Ident, ctx: &ResolveCtx) -> Result<ItemId, Error> {
 			(field.span, src_path)
 		);
 	}
-	Ok(field_id)
+	Ok(Field::Symbol(field_id))
 }
 fn try_resolve_symbol(name: Option<&Ident>, scopes: &Scopes) -> Option<ItemId> {
 	let name = name?;
@@ -471,8 +340,15 @@ fn resolve_pat_obj(
 	Ok(PatKind::Object(fields.into_boxed_slice()))
 }
 fn resolve_pat_let(
-	ident: &Ident, pat: &PatSrc, allow_let: bool, ctx: &mut ResolveCtx,
+	ident: &Ident, pat: &PatSrc, allow_let: bool, span: Span, ctx: &mut ResolveCtx,
 ) -> Result<PatKind, Error> {
+	if !allow_let {
+		return err!(
+			"resolve error: can not have let binding \"{ident}\" inside an or pattern",
+			(span, ctx.src_path)
+		);
+	}
+	let pat = resolve_pat(pat, allow_let, ctx)?;
 	let top = ctx.scopes.top_mut();
 	if top.contains_key(&ident.val) {
 		return err!(
@@ -482,7 +358,6 @@ fn resolve_pat_let(
 	}
 	let id = top.len() as LocalId;
 	top.insert(ident.val.clone(), id);
-	let pat = resolve_pat(pat, allow_let, ctx)?;
 	Ok(PatKind::Let(id, pat))
 }
 fn resolve_pat(pat: &PatSrc, allow_let: bool, ctx: &mut ResolveCtx) -> Result<PatId, Error> {
@@ -493,8 +368,9 @@ fn resolve_pat(pat: &PatSrc, allow_let: bool, ctx: &mut ResolveCtx) -> Result<Pa
 			IdentResolve::Symbol(id) => PatKind::Symbol(id),
 			IdentResolve::Const(id) => PatKind::Const(id),
 		},
+		PatSrcKind::Nb(nb) => PatKind::Nb(*nb),
 		PatSrcKind::Enum(enumm, var) => resolve_pat_enum(enumm, var, ctx)?,
-		PatSrcKind::Let(ident, pat) => resolve_pat_let(ident, pat, allow_let, ctx)?,
+		PatSrcKind::Let(ident, pat) => resolve_pat_let(ident, pat, allow_let, pat.span, ctx)?,
 		PatSrcKind::Object(items_src) => resolve_pat_obj(items_src, allow_let, ctx)?,
 		PatSrcKind::Array(items_src) => {
 			let mut items = Vec::with_capacity(items_src.len());
@@ -534,7 +410,7 @@ fn resolve_expr_call(
 	let args_given = exprs.len();
 	if args_expected != exprs.len() as u16 {
 		return err!(
-			"resolve error: function \"{fun}\" expects {args_expected} arguments but {args_given} was given",
+			"resolve error: function \"{fun}\" expects {args_expected} arguments, {args_given} was given",
 			(fun.span, src_path)
 		);
 	}
@@ -547,10 +423,11 @@ fn resolve_expr_call(
 }
 
 fn resolve_expr_field(
-	expr: &ExprSrc, field: &Ident, ctx: &mut ResolveCtx,
+	expr: &ExprSrc, field: &FieldKind, ctx: &mut ResolveCtx,
 ) -> Result<ExprKind, Error> {
 	let ResolveCtx { scopes, src_path, exec_ctx, .. } = ctx;
-	if let Some(id) = try_resolve_symbol(expr.as_ident(), scopes)
+	if let FieldKind::Ident(field) = field
+		&& let Some(id) = try_resolve_symbol(expr.as_ident(), scopes)
 		&& let Symbol { name, kind: SymbolKind::Enum(map), .. } = &exec_ctx.symbols[id as usize]
 	{
 		let Some(&id) = map.get(&field.val) else {
@@ -562,9 +439,9 @@ fn resolve_expr_field(
 		return Ok(ExprKind::Symbol(id));
 	}
 
-	let field_id = resolve_field(field, ctx)?;
+	let field = resolve_field(field, ctx)?;
 	let expr = resolve_expr(expr, ctx)?;
-	Ok(ExprKind::Field(expr, field_id))
+	Ok(ExprKind::Field(expr, field))
 }
 fn resolve_expr_obj(items_src: &[ObjectItemSrc], ctx: &mut ResolveCtx) -> Result<ExprKind, Error> {
 	let mut items = Vec::with_capacity(items_src.len());
@@ -600,11 +477,11 @@ fn resolve_expr_map(
 			ctx.scopes.add_scope();
 			let pat = resolve_pat(pat, true, ctx)?;
 			let scope_slots = ctx.scopes.top().len() as LocalId;
-			if ctx.scopes.top().len() == 0 {
+			if scope_slots == 0 {
 				ctx.scopes.pop_scope();
 			}
 			let expr = resolve_expr(map, ctx)?;
-			if ctx.scopes.top().len() != 0 {
+			if scope_slots != 0 {
 				ctx.scopes.pop_scope();
 			}
 			arms.push(MapArm { pat, expr, scope_slots });
@@ -621,6 +498,7 @@ fn resolve_expr(expr: &ExprSrc, ctx: &mut ResolveCtx) -> Result<ExprId, Error> {
 			IdentResolve::Symbol(id) => ExprKind::Symbol(id),
 			IdentResolve::Const(id) => ExprKind::Const(id),
 		},
+		ExprSrcKind::Nb(nb) => ExprKind::Nb(*nb),
 		ExprSrcKind::Field(expr, index) => resolve_expr_field(expr, index, ctx)?,
 		ExprSrcKind::Index(expr, index) => {
 			ExprKind::Index(resolve_expr(expr, ctx)?, resolve_expr(index, ctx)?)
@@ -650,12 +528,12 @@ fn resolve_expr(expr: &ExprSrc, ctx: &mut ResolveCtx) -> Result<ExprId, Error> {
 	Ok(id as ExprId)
 }
 
-pub fn resolve(loader: &fn(&Path) -> Result<LoadResult, Error>) -> Result<ExecCtx, Error> {
+pub fn resolve(root_path: &Path, loader: Loader) -> Result<ExecCtx, Error> {
 	let mut ctx = ExecCtx::default();
 
 	let mut path_tree = HashMap::new();
 	let mut files_src = Vec::new();
-	load_loop(&Path::root(), &mut path_tree, &mut files_src, loader)?;
+	load_loop(root_path, &mut path_tree, &mut files_src, "", loader)?;
 
 	let mut files = Vec::new();
 	for file in &files_src {
@@ -667,27 +545,30 @@ pub fn resolve(loader: &fn(&Path) -> Result<LoadResult, Error>) -> Result<ExecCt
 
 	for (file_id, file) in files.iter_mut().enumerate() {
 		let file_src = &files_src[file_id];
+		let src_path = &file_src.path;
 		for (ind, id) in file.fns.iter().enumerate() {
 			let src = &file_src.fns[ind];
 			let mut body = Stat::new();
-			let mut res_ctx = ResolveCtx {
-				stat: &mut body,
-				exec_ctx: &ctx,
-				src_path: &ctx.file_names[file_id],
-				scopes: Scopes::new(&file.top_scope),
-			};
+			let mut scopes = Scopes::new(&file.top_scope);
+			let top = scopes.top_mut();
+			for arg in &src.args {
+				if top.contains_key(&arg.val) {
+					return err!(
+						"resolve error: argument \"{arg}\" defined multiple times",
+						(arg.span, src_path)
+					);
+				}
+				top.insert(arg.val.clone(), top.len() as LocalId);
+			}
+			let mut res_ctx = ResolveCtx { stat: &mut body, exec_ctx: &ctx, src_path, scopes };
 			body.root_expr = resolve_expr(&src.body, &mut res_ctx)?;
 			ctx.fns[*id as usize].body = body;
 		}
 		for (ind, id) in file.consts.iter().enumerate() {
 			let src = &file_src.consts[ind];
 			let mut init = Stat::new();
-			let mut res_ctx = ResolveCtx {
-				stat: &mut init,
-				exec_ctx: &ctx,
-				src_path: &ctx.file_names[file_id],
-				scopes: Scopes::new(&file.top_scope),
-			};
+			let scopes = Scopes::new(&file.top_scope);
+			let mut res_ctx = ResolveCtx { stat: &mut init, exec_ctx: &ctx, src_path, scopes };
 			init.root_expr = resolve_expr(&src.init, &mut res_ctx)?;
 			ctx.consts[*id as usize].init = init;
 		}

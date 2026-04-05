@@ -1,10 +1,10 @@
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 
 use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
 
 use crate::utils::{Error, StrExt, err};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
 	start: (u16, u16),
 	end: (u16, u16),
@@ -40,6 +40,11 @@ impl Display for Span {
 		}
 	}
 }
+impl Debug for Span {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		if self.is_none() { write!(f, "Span::none") } else { write!(f, "Span({self})") }
+	}
+}
 
 pub fn unexpected_token<T>(
 	token: impl Display, expected: &str, span: Span, file: &str,
@@ -66,6 +71,7 @@ pub struct Token<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub enum TokenKind<'a> {
 	Ident(&'a str),
+	Nb(u64),
 	Dot,
 	Eq,
 	Colon,
@@ -91,6 +97,7 @@ impl Display for TokenKind<'_> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
 			Self::Ident(ident) => f.write_str(ident),
+			Self::Nb(nb) => write!(f, "{nb}"),
 			Self::Dot => f.write_str("."),
 			Self::Eq => f.write_str("="),
 			Self::Colon => f.write_str(":"),
@@ -116,7 +123,7 @@ impl Display for TokenKind<'_> {
 }
 impl Display for Token<'_> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		self.kind.fmt(f)
+		Display::fmt(&self.kind, f)
 	}
 }
 
@@ -228,7 +235,15 @@ pub fn tokenize<'a>(source: &'a str, src_path: &str) -> Result<Vec<Token<'a>>, E
 					"fn" => Kind::Fn,
 					"symbol" => Kind::Symbol,
 					"import" => Kind::Import,
-					_ if ident.chars().all(|c| c.is_ascii_digit()) => Kind::Ident(ident),
+					_ if ident.chars().all(|c| c.is_ascii_digit()) => {
+						let Ok(nb) = ident.parse::<u64>() else {
+							return err!(
+								"parse error: number ({ident}) is so large.",
+								(span, src_path)
+							);
+						};
+						Kind::Nb(nb)
+					}
 					_ => Kind::Ident(ident),
 				};
 				tokens.push(Token { kind, span });

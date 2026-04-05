@@ -43,10 +43,16 @@ impl Display for Path {
 		write!(f, "{}", Path::display(&self.segments))
 	}
 }
+impl<T: Into<CompactString>> FromIterator<T> for Path {
+	fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+		let segments = iter.into_iter().map(|v| Ident { val: v.into(), span: Span::none() });
+		Path { segments: segments.collect(), span: Span::none() }
+	}
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldPat {
-	Key(Ident, Pat),
+	Key(FieldKind, Pat),
 	Index(Expr, Pat),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +64,7 @@ pub enum ArrItemPat {
 pub enum PatKind {
 	Any,
 	Ident(Ident),
+	Nb(u64),
 	Enum(Ident, Box<Ident>),
 	Let(Ident, Box<Pat>),
 	Object(Vec<FieldPat>),
@@ -80,7 +87,7 @@ impl Pat {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectItem {
-	KeyValue(Ident, Expr),
+	KeyValue(FieldKind, Expr),
 	IndexValue(Expr, Expr),
 	Rest(Expr),
 }
@@ -95,13 +102,19 @@ pub struct MapArm {
 	pub map: Expr,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldKind {
+	Ident(Ident),
+	Nb(u64),
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExprKind {
 	Cur,
 	Ident(Ident),
+	Nb(u64),
 	Call(Ident, Vec<Expr>),
 	Object(Vec<ObjectItem>),
 	Array(Vec<ArrayItem>),
-	Field(Box<Expr>, Ident),
+	Field(Box<Expr>, FieldKind),
 	Index(Box<Expr>, Box<Expr>),
 	Map(Box<Expr>, Vec<MapArm>),
 	Pipe(Vec<Expr>),
@@ -223,6 +236,13 @@ impl<'a> Cursor<'a> {
 		};
 		Ok(ident)
 	}
+	pub fn try_consume_nb(&self) -> Option<(u64, Span)> {
+		if let Token { kind: TokenKind::Nb(nb), span } = self.peek() {
+			self.skip();
+			return Some((*nb, *span));
+		}
+		None
+	}
 	pub fn consume_any(&self) -> Option<&Token<'_>> {
 		let token = self.peek();
 		if token.kind == TokenKind::EOF {
@@ -287,9 +307,13 @@ fn parse_pat_obj(cur: &Cursor) -> Result<Pat, Error> {
 				span: let_span.join(pat.span),
 				kind: PatKind::Let(field.clone(), Box::new(pat)),
 			};
-			Ok(FieldPat::Key(field, let_pat))
+			Ok(FieldPat::Key(FieldKind::Ident(field), let_pat))
 		} else {
-			let field = cur.consume_ident()?;
+			let field = if let Some((nb, _)) = cur.try_consume_nb() {
+				FieldKind::Nb(nb)
+			} else {
+				FieldKind::Ident(cur.consume_ident()?)
+			};
 			cur.consume(Colon)?;
 			let pat = parse_pat(cur)?;
 			Ok(FieldPat::Key(field, pat))
@@ -300,6 +324,8 @@ fn parse_pat_obj(cur: &Cursor) -> Result<Pat, Error> {
 fn parse_pat_primary(cur: &Cursor) -> Result<Pat, Error> {
 	if let Some(span) = cur.try_consume(Dash) {
 		Ok(Pat { span, kind: PatKind::Any })
+	} else if let Some((nb, span)) = cur.try_consume_nb() {
+		Ok(Pat { kind: PatKind::Nb(nb), span })
 	} else if let Some(ident) = cur.try_consume_ident() {
 		if cur.try_eat(Dot) {
 			let var = cur.consume_ident()?;
@@ -365,7 +391,11 @@ fn parse_expr_obj(cur: &Cursor) -> Result<Expr, Error> {
 			let value = parse_expr(cur)?;
 			Ok(ObjectItem::IndexValue(index, value))
 		} else {
-			let field = cur.consume_ident()?;
+			let field = if let Some((nb, _)) = cur.try_consume_nb() {
+				FieldKind::Nb(nb)
+			} else {
+				FieldKind::Ident(cur.consume_ident()?)
+			};
 			cur.consume(Eq)?;
 			let value = parse_expr(cur)?;
 			Ok(ObjectItem::KeyValue(field, value))
@@ -376,6 +406,8 @@ fn parse_expr_obj(cur: &Cursor) -> Result<Expr, Error> {
 fn parse_expr_primary(cur: &Cursor) -> Result<Expr, Error> {
 	if let Some(span) = cur.try_consume(Dash) {
 		Ok(Expr { span, kind: ExprKind::Cur })
+	} else if let Some((nb, span)) = cur.try_consume_nb() {
+		Ok(Expr { span, kind: ExprKind::Nb(nb) })
 	} else if let Some(ident) = cur.try_consume_ident() {
 		if cur.test(ParenOpen) {
 			let args = parse_delim_list(cur, ParenOpen, ParenClose, Comma, |cur| {
@@ -407,7 +439,12 @@ fn parse_expr_postfix(cur: &Cursor) -> Result<Expr, Error> {
 	loop {
 		let start_span = expr.span;
 		let kind = if cur.try_eat(Dot) {
-			ExprKind::Field(Box::new(expr), cur.consume_ident()?)
+			let field = if let Some((nb, _)) = cur.try_consume_nb() {
+				FieldKind::Nb(nb)
+			} else {
+				FieldKind::Ident(cur.consume_ident()?)
+			};
+			ExprKind::Field(Box::new(expr), field)
 		} else if cur.try_eat(BracketOpen) {
 			let index = parse_expr(cur)?;
 			cur.consume(BracketClose)?;

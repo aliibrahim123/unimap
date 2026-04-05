@@ -27,6 +27,7 @@ pub struct Error {
 impl Error {
 	pub fn new(mut msg: String, span: Span, at: &str) -> Self {
 		write!(msg, "\n  --> {at}").unwrap();
+
 		if !span.is_none() {
 			write!(msg, ":{span}").unwrap()
 		}
