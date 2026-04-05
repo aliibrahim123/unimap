@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use compact_str::CompactString;
 
 use crate::{
 	exec::{
 		ArrItemPat, ArrayItem, Const, ExecCtx, Expr, ExprId, ExprKind, Field, FieldPat, Fn, ItemId,
-		LocalId, MapArm, ObjectItem, Pat, PatId, PatKind, ScopeId, Stat, Symbol, SymbolKind,
+		LocalId, MapArm, ObjectItem, Pat, PatId, PatKind, Stat, Symbol, SymbolKind,
 	},
 	parser::{
 		ArrItemPat as ArrItemPatSrc, ArrayItem as ArrayItemSrc, Const as ConstSrc, Expr as ExprSrc,
@@ -119,7 +119,8 @@ struct File {
 	pub consts: Vec<ItemId>,
 }
 
-fn gather(src: &FileSrc, ctx: &mut ExecCtx) -> Result<File, Error> {
+type VarMap = HashMap<ItemId, HashMap<CompactString, ItemId>>;
+fn gather(src: &FileSrc, var_map: &mut VarMap, ctx: &mut ExecCtx) -> Result<File, Error> {
 	let ExecCtx { file_names, consts, fns, symbols } = ctx;
 	let mut file = File::default();
 	let src_path = file_names.len();
@@ -137,9 +138,13 @@ fn gather(src: &FileSrc, ctx: &mut ExecCtx) -> Result<File, Error> {
 	};
 
 	for SymbolSrc { name, kind } in &src.symbols {
-		let kind = match kind {
+		let id = symbols.len() as ItemId;
+		gather_item(name, ItemType::Symbol, id)?;
+		symbols.push(Symbol { name: name.clone(), kind: SymbolKind::Atom, src_path });
+		symbols[id as usize].kind = match kind {
 			SymbolSrcKind::Atom => SymbolKind::Atom,
 			SymbolSrcKind::Enum(variants) => {
+				let mut vars = HashSet::new();
 				let mut map = HashMap::new();
 				for var in variants {
 					if map.contains_key(&var.val) {
@@ -148,15 +153,15 @@ fn gather(src: &FileSrc, ctx: &mut ExecCtx) -> Result<File, Error> {
 							(var.span, &src.path)
 						);
 					}
-					let id = symbols.len();
-					symbols.push(Symbol { name: var.clone(), kind: SymbolKind::Atom, src_path });
-					map.insert(var.val.clone(), id as ItemId);
+					let var_id = symbols.len() as ItemId;
+					symbols.push(Symbol { name: var.clone(), kind: SymbolKind::Var(id), src_path });
+					vars.insert(var_id);
+					map.insert(var.val.clone(), var_id);
 				}
-				SymbolKind::Enum(map)
+				var_map.insert(id, map);
+				SymbolKind::Enum(vars)
 			}
 		};
-		gather_item(name, ItemType::Symbol, symbols.len() as ItemId)?;
-		symbols.push(Symbol { name: name.clone(), kind, src_path });
 	}
 	for ConstSrc { name, .. } in &src.consts {
 		let id = consts.len() as ItemId;
@@ -207,11 +212,12 @@ struct Scopes<'a> {
 	pub items: &'a ItemScope,
 	pub locals: Vec<LocalScope>,
 	pub local_top: usize,
+	pub local_counter: LocalId,
 }
 type LocalScope = HashMap<CompactString, LocalId>;
 impl<'a> Scopes<'a> {
 	pub fn new(items: &'a ItemScope) -> Scopes<'a> {
-		Self { items, locals: vec![HashMap::new()], local_top: 0 }
+		Self { items, locals: vec![HashMap::new()], local_top: 0, local_counter: 0 }
 	}
 	pub fn add_scope(&mut self) {
 		self.local_top += 1;
@@ -222,17 +228,20 @@ impl<'a> Scopes<'a> {
 	pub fn top(&self) -> &LocalScope {
 		&self.locals[self.local_top]
 	}
-	pub fn top_mut(&mut self) -> &mut LocalScope {
-		&mut self.locals[self.local_top]
+	pub fn add_local(&mut self, name: CompactString) -> LocalId {
+		self.local_counter += 1;
+		self.locals[self.local_top].insert(name, self.local_counter);
+		self.local_counter
 	}
 	pub fn pop_scope(&mut self) {
+		self.local_counter -= self.locals[self.local_top].len() as LocalId;
 		self.locals[self.local_top].clear();
 		self.local_top -= 1;
 	}
-	pub fn resolve_local(&self, name: &Ident) -> Option<(ScopeId, LocalId)> {
-		for (scope_id, scope) in self.locals[..=self.local_top].iter().enumerate().rev() {
+	pub fn resolve_local(&self, name: &Ident) -> Option<LocalId> {
+		for scope in &self.locals[..=self.local_top] {
 			if let Some(&id) = scope.get(&name.val) {
-				return Some((scope_id as ScopeId, id));
+				return Some(id);
 			}
 		}
 		None
@@ -249,6 +258,7 @@ struct ResolveCtx<'a> {
 	pub stat: &'a mut Stat,
 	pub scopes: Scopes<'a>,
 	pub exec_ctx: &'a ExecCtx,
+	pub var_map: &'a VarMap,
 	pub src_path: &'a str,
 }
 fn resolve_field(field: &FieldKind, ctx: &ResolveCtx) -> Result<Field, Error> {
@@ -280,22 +290,23 @@ fn try_resolve_symbol(name: Option<&Ident>, scopes: &Scopes) -> Option<ItemId> {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IdentResolve {
-	Local(ScopeId, LocalId),
+	Local(LocalId),
 	Const(ItemId),
-	Symbol(ItemId),
+	Symbol(ItemId, bool),
 }
-fn resolve_ident(name: &Ident, ctx: &ResolveCtx) -> Result<IdentResolve, Error> {
+fn resolve_ident(name: &Ident, ctx: &ResolveCtx, with_enum: bool) -> Result<IdentResolve, Error> {
 	let ResolveCtx { scopes, src_path, exec_ctx, .. } = ctx;
-	if let Some((scope_id, local_id)) = scopes.resolve_local(name) {
-		return Ok(IdentResolve::Local(scope_id, local_id));
+	if let Some(local_id) = scopes.resolve_local(name) {
+		return Ok(IdentResolve::Local(local_id));
 	}
 
 	let (item_type, item_id) = scopes.resolve_item(name, src_path)?;
 	if item_type == ItemType::Symbol {
-		if exec_ctx.symbols[item_id as usize].kind != SymbolKind::Atom {
+		let kind = &exec_ctx.symbols[item_id as usize].kind;
+		if !with_enum && *kind != SymbolKind::Atom {
 			err!("resolve error: item \"{name}\" is a symbol enum", (name.span, src_path))
 		} else {
-			Ok(IdentResolve::Symbol(item_id))
+			Ok(IdentResolve::Symbol(item_id, matches!(kind, SymbolKind::Enum(_))))
 		}
 	} else if item_type == ItemType::Const {
 		Ok(IdentResolve::Const(item_id))
@@ -304,15 +315,12 @@ fn resolve_ident(name: &Ident, ctx: &ResolveCtx) -> Result<IdentResolve, Error> 
 	}
 }
 fn resolve_pat_enum(enumm: &Ident, var: &Ident, ctx: &mut ResolveCtx) -> Result<PatKind, Error> {
-	let ResolveCtx { src_path, scopes, .. } = ctx;
+	let ResolveCtx { src_path, scopes, var_map, .. } = ctx;
 	if scopes.resolve_local(enumm).is_some() {
-		return err!("resolve error: \"{enumm}\" is not a symbol", (enumm.span, src_path));
+		return err!("resolve error: \"{enumm}\" is not a symbol enum", (enumm.span, src_path));
 	}
-	let (enum_type, enum_id) = scopes.resolve_item(enumm, src_path)?;
-	if enum_type != ItemType::Symbol {
-		return err!("resolve error: \"{enumm}\" is not a symbol", (enumm.span, src_path));
-	}
-	let Symbol { kind: SymbolKind::Enum(map), .. } = &ctx.exec_ctx.symbols[enum_id as usize] else {
+	let (_, enum_id) = scopes.resolve_item(enumm, src_path)?;
+	let Some(map) = var_map.get(&enum_id) else {
 		return err!("resolve error: \"{enumm}\" is not a symbol enum", (enumm.span, src_path));
 	};
 	let Some(&id) = map.get(&var.val) else {
@@ -321,7 +329,7 @@ fn resolve_pat_enum(enumm: &Ident, var: &Ident, ctx: &mut ResolveCtx) -> Result<
 			(var.span, src_path)
 		);
 	};
-	Ok(PatKind::Symbol(id))
+	Ok(PatKind::Symbol { id, is_enum: false })
 }
 fn resolve_pat_obj(
 	fields_src: &[FieldPatSrc], allow_let: bool, ctx: &mut ResolveCtx,
@@ -349,23 +357,21 @@ fn resolve_pat_let(
 		);
 	}
 	let pat = resolve_pat(pat, allow_let, ctx)?;
-	let top = ctx.scopes.top_mut();
-	if top.contains_key(&ident.val) {
+	if ctx.scopes.top().contains_key(&ident.val) {
 		return err!(
 			"resolve error: local \"{ident}\" is already defined",
 			(ident.span, ctx.src_path)
 		);
 	}
-	let id = top.len() as LocalId;
-	top.insert(ident.val.clone(), id);
+	let id = ctx.scopes.add_local(ident.val.clone());
 	Ok(PatKind::Let(id, pat))
 }
 fn resolve_pat(pat: &PatSrc, allow_let: bool, ctx: &mut ResolveCtx) -> Result<PatId, Error> {
 	let kind = match &pat.kind {
 		PatSrcKind::Any => return Ok(0),
-		PatSrcKind::Ident(name) => match resolve_ident(name, ctx)? {
-			IdentResolve::Local(scope, local) => PatKind::Local(scope, local),
-			IdentResolve::Symbol(id) => PatKind::Symbol(id),
+		PatSrcKind::Ident(name) => match resolve_ident(name, ctx, true)? {
+			IdentResolve::Local(local) => PatKind::Local(local),
+			IdentResolve::Symbol(id, is_enum) => PatKind::Symbol { id, is_enum },
 			IdentResolve::Const(id) => PatKind::Const(id),
 		},
 		PatSrcKind::Nb(nb) => PatKind::Nb(*nb),
@@ -425,18 +431,19 @@ fn resolve_expr_call(
 fn resolve_expr_field(
 	expr: &ExprSrc, field: &FieldKind, ctx: &mut ResolveCtx,
 ) -> Result<ExprKind, Error> {
-	let ResolveCtx { scopes, src_path, exec_ctx, .. } = ctx;
+	let ResolveCtx { scopes, var_map, src_path, .. } = ctx;
 	if let FieldKind::Ident(field) = field
-		&& let Some(id) = try_resolve_symbol(expr.as_ident(), scopes)
-		&& let Symbol { name, kind: SymbolKind::Enum(map), .. } = &exec_ctx.symbols[id as usize]
+		&& let Some(name) = expr.as_ident()
+		&& let Some(id) = try_resolve_symbol(Some(name), scopes)
+		&& let Some(map) = var_map.get(&id)
 	{
-		let Some(&id) = map.get(&field.val) else {
+		let Some(id) = map.get(&field.val) else {
 			return err!(
 				"resolve error: symbol enum \"{name}\" doesnt have variant \"{field}\"",
 				(field.span, src_path)
 			);
 		};
-		return Ok(ExprKind::Symbol(id));
+		return Ok(ExprKind::Symbol(*id));
 	}
 
 	let field = resolve_field(field, ctx)?;
@@ -484,7 +491,7 @@ fn resolve_expr_map(
 			if scope_slots != 0 {
 				ctx.scopes.pop_scope();
 			}
-			arms.push(MapArm { pat, expr, scope_slots });
+			arms.push(MapArm { pat, expr, stack_slots: scope_slots });
 		}
 		Ok(ExprKind::Map(expr, arms.into_boxed_slice()))
 	}
@@ -493,9 +500,9 @@ fn resolve_expr(expr: &ExprSrc, ctx: &mut ResolveCtx) -> Result<ExprId, Error> {
 	let kind = match &expr.kind {
 		ExprSrcKind::Cur => return Ok(0),
 		ExprSrcKind::Call(fun, exprs) => resolve_expr_call(fun, exprs, ctx)?,
-		ExprSrcKind::Ident(name) => match resolve_ident(name, ctx)? {
-			IdentResolve::Local(scope, local) => ExprKind::Local(scope, local),
-			IdentResolve::Symbol(id) => ExprKind::Symbol(id),
+		ExprSrcKind::Ident(name) => match resolve_ident(name, ctx, false)? {
+			IdentResolve::Local(local) => ExprKind::Local(local),
+			IdentResolve::Symbol(id, _) => ExprKind::Symbol(id),
 			IdentResolve::Const(id) => ExprKind::Const(id),
 		},
 		ExprSrcKind::Nb(nb) => ExprKind::Nb(*nb),
@@ -536,8 +543,9 @@ pub fn resolve(root_path: &Path, loader: Loader) -> Result<ExecCtx, Error> {
 	load_loop(root_path, &mut path_tree, &mut files_src, "", loader)?;
 
 	let mut files = Vec::new();
+	let var_map = &mut HashMap::new();
 	for file in &files_src {
-		files.push(gather(file, &mut ctx)?);
+		files.push(gather(file, var_map, &mut ctx)?);
 	}
 	for (file_id, src) in files_src.iter().enumerate() {
 		resolve_imports(file_id, src, &mut files, &path_tree)?;
@@ -550,17 +558,17 @@ pub fn resolve(root_path: &Path, loader: Loader) -> Result<ExecCtx, Error> {
 			let src = &file_src.fns[ind];
 			let mut body = Stat::new();
 			let mut scopes = Scopes::new(&file.top_scope);
-			let top = scopes.top_mut();
 			for arg in &src.args {
-				if top.contains_key(&arg.val) {
+				if scopes.top().contains_key(&arg.val) {
 					return err!(
 						"resolve error: argument \"{arg}\" defined multiple times",
 						(arg.span, src_path)
 					);
 				}
-				top.insert(arg.val.clone(), top.len() as LocalId);
+				scopes.add_local(arg.val.clone());
 			}
-			let mut res_ctx = ResolveCtx { stat: &mut body, exec_ctx: &ctx, src_path, scopes };
+			let mut res_ctx =
+				ResolveCtx { stat: &mut body, exec_ctx: &ctx, var_map, src_path, scopes };
 			body.root_expr = resolve_expr(&src.body, &mut res_ctx)?;
 			ctx.fns[*id as usize].body = body;
 		}
@@ -568,7 +576,8 @@ pub fn resolve(root_path: &Path, loader: Loader) -> Result<ExecCtx, Error> {
 			let src = &file_src.consts[ind];
 			let mut init = Stat::new();
 			let scopes = Scopes::new(&file.top_scope);
-			let mut res_ctx = ResolveCtx { stat: &mut init, exec_ctx: &ctx, src_path, scopes };
+			let mut res_ctx =
+				ResolveCtx { stat: &mut init, exec_ctx: &ctx, var_map, src_path, scopes };
 			init.root_expr = resolve_expr(&src.init, &mut res_ctx)?;
 			ctx.consts[*id as usize].init = init;
 		}

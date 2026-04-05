@@ -1,13 +1,12 @@
-use std::collections::HashMap;
-
-use compact_str::CompactString;
+use std::collections::{HashMap, HashSet};
 
 use crate::{parser::Ident, tokenizer::Span, value::Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymbolKind {
 	Atom,
-	Enum(HashMap<CompactString, ItemId>),
+	Enum(HashSet<ItemId>),
+	Var(ItemId),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Symbol {
@@ -58,8 +57,7 @@ pub struct ExecCtx {
 
 pub type ExprId = u16;
 pub type PatId = u16;
-pub type ScopeId = u16;
-pub type LocalId = u16;
+pub type LocalId = u32;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expr {
 	pub span: Span,
@@ -84,7 +82,7 @@ pub enum ArrayItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapArm {
 	pub pat: PatId,
-	pub scope_slots: LocalId,
+	pub stack_slots: LocalId,
 	pub expr: ExprId,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,7 +91,7 @@ pub enum ExprKind {
 	Symbol(ItemId),
 	Nb(u64),
 	Const(ItemId),
-	Local(ScopeId, LocalId),
+	Local(LocalId),
 	Call(ItemId, Box<[ExprId]>),
 	Field(ExprId, Field),
 	Index(ExprId, ExprId),
@@ -121,10 +119,10 @@ pub enum ArrItemPat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatKind {
 	Any,
-	Symbol(ItemId),
+	Symbol { id: ItemId, is_enum: bool },
 	Nb(u64),
 	Const(ItemId),
-	Local(ScopeId, LocalId),
+	Local(LocalId),
 	Let(LocalId, PatId),
 	Object(Box<[FieldPat]>),
 	Array(Box<[ArrItemPat]>),
