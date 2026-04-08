@@ -4,8 +4,8 @@ use compact_str::CompactString;
 
 use crate::{
 	exec::{
-		ArrItemPat, ArrayItem, Const, ExecCtx, Expr, ExprId, ExprKind, Field, FieldPat, Fn, ItemId,
-		LocalId, MapArm, ObjectItem, Pat, PatId, PatKind, Stat, Symbol, SymbolKind,
+		ArrItemPat, ArrayItem, Const, Execution, Expr, ExprId, ExprKind, Field, FieldPat, Fn,
+		ItemId, LocalId, MapArm, ObjectItem, Pat, PatId, PatKind, Stat, Symbol, SymbolKind,
 	},
 	parser::{
 		ArrItemPat as ArrItemPatSrc, ArrayItem as ArrayItemSrc, Const as ConstSrc, Expr as ExprSrc,
@@ -120,8 +120,8 @@ struct File {
 }
 
 type VarMap = HashMap<ItemId, HashMap<CompactString, ItemId>>;
-fn gather(src: &FileSrc, var_map: &mut VarMap, ctx: &mut ExecCtx) -> Result<File, Error> {
-	let ExecCtx { file_names, consts, fns, symbols } = ctx;
+fn gather(src: &FileSrc, var_map: &mut VarMap, exec: &mut Execution) -> Result<File, Error> {
+	let Execution { file_names, consts, fns, symbols, .. } = exec;
 	let mut file = File::default();
 	let src_path = file_names.len();
 	file_names.push(src.path.to_string());
@@ -253,11 +253,11 @@ impl<'a> Scopes<'a> {
 		Ok((*item_type, *item_id))
 	}
 }
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 struct ResolveCtx<'a> {
 	pub stat: &'a mut Stat,
 	pub scopes: Scopes<'a>,
-	pub exec_ctx: &'a ExecCtx,
+	pub exec: &'a Execution,
 	pub var_map: &'a VarMap,
 	pub src_path: &'a str,
 }
@@ -275,7 +275,7 @@ fn resolve_field(field: &FieldKind, ctx: &ResolveCtx) -> Result<Field, Error> {
 			(field.span, src_path)
 		);
 	}
-	if ctx.exec_ctx.symbols[field_id as usize].kind != SymbolKind::Atom {
+	if ctx.exec.symbols[field_id as usize].kind != SymbolKind::Atom {
 		return err!(
 			"resolve error: symbol enum \"{field}\" can not be used as a field",
 			(field.span, src_path)
@@ -295,14 +295,14 @@ enum IdentResolve {
 	Symbol(ItemId, bool),
 }
 fn resolve_ident(name: &Ident, ctx: &ResolveCtx, with_enum: bool) -> Result<IdentResolve, Error> {
-	let ResolveCtx { scopes, src_path, exec_ctx, .. } = ctx;
+	let ResolveCtx { scopes, src_path, exec, .. } = ctx;
 	if let Some(local_id) = scopes.resolve_local(name) {
 		return Ok(IdentResolve::Local(local_id));
 	}
 
 	let (item_type, item_id) = scopes.resolve_item(name, src_path)?;
 	if item_type == ItemType::Symbol {
-		let kind = &exec_ctx.symbols[item_id as usize].kind;
+		let kind = &exec.symbols[item_id as usize].kind;
 		if !with_enum && *kind != SymbolKind::Atom {
 			err!("resolve error: item \"{name}\" is a symbol enum", (name.span, src_path))
 		} else {
@@ -403,7 +403,7 @@ fn resolve_pat(pat: &PatSrc, allow_let: bool, ctx: &mut ResolveCtx) -> Result<Pa
 fn resolve_expr_call(
 	fun: &Ident, exprs: &[ExprSrc], ctx: &mut ResolveCtx,
 ) -> Result<ExprKind, Error> {
-	let ResolveCtx { scopes, exec_ctx, src_path, .. } = ctx;
+	let ResolveCtx { scopes, exec, src_path, .. } = ctx;
 	if scopes.resolve_local(fun).is_some() {
 		return err!("resolve error: \"{fun}\" is not a function", (fun.span, src_path));
 	}
@@ -412,7 +412,7 @@ fn resolve_expr_call(
 		return err!("resolve error: \"{fun}\" is not a function", (fun.span, src_path));
 	}
 
-	let args_expected = exec_ctx.fns[fun_id as usize].args_count;
+	let args_expected = exec.fns[fun_id as usize].args_count;
 	let args_given = exprs.len();
 	if args_expected != exprs.len() as u16 {
 		return err!(
@@ -535,8 +535,8 @@ fn resolve_expr(expr: &ExprSrc, ctx: &mut ResolveCtx) -> Result<ExprId, Error> {
 	Ok(id as ExprId)
 }
 
-pub fn resolve(root_path: &Path, loader: Loader) -> Result<ExecCtx, Error> {
-	let mut ctx = ExecCtx::default();
+pub fn resolve(root_path: &Path, loader: Loader) -> Result<Execution, Error> {
+	let mut exec = Execution::default();
 
 	let mut path_tree = HashMap::new();
 	let mut files_src = Vec::new();
@@ -545,7 +545,7 @@ pub fn resolve(root_path: &Path, loader: Loader) -> Result<ExecCtx, Error> {
 	let mut files = Vec::new();
 	let var_map = &mut HashMap::new();
 	for file in &files_src {
-		files.push(gather(file, var_map, &mut ctx)?);
+		files.push(gather(file, var_map, &mut exec)?);
 	}
 	for (file_id, src) in files_src.iter().enumerate() {
 		resolve_imports(file_id, src, &mut files, &path_tree)?;
@@ -568,20 +568,20 @@ pub fn resolve(root_path: &Path, loader: Loader) -> Result<ExecCtx, Error> {
 				scopes.add_local(arg.val.clone());
 			}
 			let mut res_ctx =
-				ResolveCtx { stat: &mut body, exec_ctx: &ctx, var_map, src_path, scopes };
+				ResolveCtx { stat: &mut body, exec: &exec, var_map, src_path, scopes };
 			body.root_expr = resolve_expr(&src.body, &mut res_ctx)?;
-			ctx.fns[*id as usize].body = body;
+			exec.fns[*id as usize].body = body;
 		}
 		for (ind, id) in file.consts.iter().enumerate() {
 			let src = &file_src.consts[ind];
 			let mut init = Stat::new();
 			let scopes = Scopes::new(&file.top_scope);
 			let mut res_ctx =
-				ResolveCtx { stat: &mut init, exec_ctx: &ctx, var_map, src_path, scopes };
+				ResolveCtx { stat: &mut init, exec: &exec, var_map, src_path, scopes };
 			init.root_expr = resolve_expr(&src.init, &mut res_ctx)?;
-			ctx.consts[*id as usize].init = init;
+			exec.consts[*id as usize].init = init;
 		}
 	}
 
-	Ok(ctx)
+	Ok(exec)
 }

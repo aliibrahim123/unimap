@@ -1,6 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{parser::Ident, tokenizer::Span, value::Value};
+use crate::{
+	parser::Ident,
+	tokenizer::Span,
+	value::{Value, ValuePool},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymbolKind {
@@ -47,12 +51,14 @@ impl Fn {
 
 pub type ItemId = u32;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ExecCtx {
+#[derive(Debug, Default)]
+pub struct Execution {
 	pub file_names: Vec<String>,
 	pub consts: Vec<Const>,
 	pub fns: Vec<Fn>,
 	pub symbols: Vec<Symbol>,
+	pub pool: ValuePool,
+	pub stack: Vec<Value>,
 }
 
 pub type ExprId = u16;
@@ -145,4 +151,8 @@ impl Stat {
 	pub fn dummy() -> Self {
 		Self { exprs: Vec::new(), pats: Vec::new(), root_expr: 0 }
 	}
+}
+
+fn exec_expr(expr: ExprId, stat: &Stat, stack_top: usize, ctx: &mut Execution) -> Value {
+	todo!()
 }
