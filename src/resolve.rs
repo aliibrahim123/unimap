@@ -4,8 +4,8 @@ use compact_str::CompactString;
 
 use crate::{
 	exec::{
-		ArrItemPat, ArrayItem, Const, Execution, Expr, ExprId, ExprKind, Field, FieldPat, Fn,
-		ItemId, LocalId, MapArm, ObjectItem, Pat, PatId, PatKind, Stat, Symbol, SymbolKind,
+		ArrItemPat, ArrayItem, Const, ExecRes, Expr, ExprId, ExprKind, Field, FieldPat, Fn, ItemId,
+		LocalId, MapArm, ObjectItem, Pat, PatId, PatKind, Stat, Symbol, SymbolKind,
 	},
 	parser::{
 		ArrItemPat as ArrItemPatSrc, ArrayItem as ArrayItemSrc, Const as ConstSrc, Expr as ExprSrc,
@@ -120,8 +120,8 @@ struct File {
 }
 
 type VarMap = HashMap<ItemId, HashMap<CompactString, ItemId>>;
-fn gather(src: &FileSrc, var_map: &mut VarMap, exec: &mut Execution) -> Result<File, Error> {
-	let Execution { file_names, consts, fns, symbols, .. } = exec;
+fn gather(src: &FileSrc, var_map: &mut VarMap, exec: &mut ExecRes) -> Result<File, Error> {
+	let ExecRes { file_names, consts, fns, symbols, .. } = exec;
 	let mut file = File::default();
 	let src_path = file_names.len();
 	file_names.push(src.path.to_string());
@@ -257,7 +257,7 @@ impl<'a> Scopes<'a> {
 struct ResolveCtx<'a> {
 	pub stat: &'a mut Stat,
 	pub scopes: Scopes<'a>,
-	pub exec: &'a Execution,
+	pub exec: &'a ExecRes,
 	pub var_map: &'a VarMap,
 	pub src_path: &'a str,
 }
@@ -457,7 +457,7 @@ fn resolve_expr_obj(items_src: &[ObjectItemSrc], ctx: &mut ResolveCtx) -> Result
 			ObjectItemSrc::IndexValue(index, value) => {
 				ObjectItem::IndexValue(resolve_expr(index, ctx)?, resolve_expr(value, ctx)?)
 			}
-			ObjectItemSrc::Rest(expr) => ObjectItem::Rest(resolve_expr(expr, ctx)?),
+			ObjectItemSrc::Spread(expr) => ObjectItem::Spread(resolve_expr(expr, ctx)?),
 			ObjectItemSrc::KeyValue(field, value) => {
 				ObjectItem::KeyValue(resolve_field(field, ctx)?, resolve_expr(value, ctx)?)
 			}
@@ -516,7 +516,7 @@ fn resolve_expr(expr: &ExprSrc, ctx: &mut ResolveCtx) -> Result<ExprId, Error> {
 			for item in items_src {
 				items.push(match item {
 					ArrayItemSrc::One(expr) => ArrayItem::One(resolve_expr(expr, ctx)?),
-					ArrayItemSrc::Rest(expr) => ArrayItem::Rest(resolve_expr(expr, ctx)?),
+					ArrayItemSrc::Spread(expr) => ArrayItem::Spread(resolve_expr(expr, ctx)?),
 				})
 			}
 			ExprKind::Array(items.into_boxed_slice())
@@ -535,8 +535,8 @@ fn resolve_expr(expr: &ExprSrc, ctx: &mut ResolveCtx) -> Result<ExprId, Error> {
 	Ok(id as ExprId)
 }
 
-pub fn resolve(root_path: &Path, loader: Loader) -> Result<Execution, Error> {
-	let mut exec = Execution::default();
+pub fn resolve(root_path: &Path, loader: Loader) -> Result<ExecRes, Error> {
+	let mut exec = ExecRes::default();
 
 	let mut path_tree = HashMap::new();
 	let mut files_src = Vec::new();

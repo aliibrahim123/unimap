@@ -89,12 +89,12 @@ impl Pat {
 pub enum ObjectItem {
 	KeyValue(FieldKind, Expr),
 	IndexValue(Expr, Expr),
-	Rest(Expr),
+	Spread(Expr),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArrayItem {
 	One(Expr),
-	Rest(Expr),
+	Spread(Expr),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapArm {
@@ -382,7 +382,7 @@ fn parse_expr_obj(cur: &Cursor) -> Result<Expr, Error> {
 	let items = parse_delim_list(cur, BraceOpen, BraceClose, Comma, |cur| {
 		if cur.try_eat(Dot) {
 			cur.consume(Dot)?;
-			return Ok(ObjectItem::Rest(parse_expr(cur)?));
+			return Ok(ObjectItem::Spread(parse_expr(cur)?));
 		}
 		if cur.try_eat(BracketOpen) {
 			let index = parse_expr(cur)?;
@@ -424,7 +424,7 @@ fn parse_expr_primary(cur: &Cursor) -> Result<Expr, Error> {
 		let items = parse_delim_list(cur, BracketOpen, BracketClose, Comma, |cur| {
 			if cur.try_eat(Dot) {
 				cur.consume(Dot)?;
-				Ok(ArrayItem::Rest(parse_expr(cur)?))
+				Ok(ArrayItem::Spread(parse_expr(cur)?))
 			} else {
 				Ok(ArrayItem::One(parse_expr(cur)?))
 			}

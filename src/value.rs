@@ -1,13 +1,15 @@
 use std::{
-	collections::HashMap,
+	cell::{Cell, UnsafeCell},
 	fmt::Write,
 	ops::{Index, IndexMut},
 	usize,
 };
 
-use crate::exec::{Execution, ItemId};
+use rustc_hash::FxHashMap;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+use crate::exec::{ExecRes, Field, ItemId};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Value(u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,52 +40,62 @@ impl Value {
 		Self(id | Self::ARR_PRE)
 	}
 
-	pub fn decompress(&self) -> ValueDec {
+	pub fn decompress(self) -> ValueDec {
 		let Self(val) = self;
 		if val & Self::NB_PRE != 0 {
 			ValueDec::Nb(val & !Self::NB_PRE)
 		} else if val & Self::ARR_PRE == 0 {
-			ValueDec::Sym(*val as ItemId)
+			ValueDec::Sym(val as ItemId)
 		} else if val & Self::ARR_PRE == Self::ARR_PRE {
 			ValueDec::Arr(val & !Self::ARR_PRE)
 		} else {
 			ValueDec::Obj(val & !Self::OBJ_PRE)
 		}
 	}
-	pub fn as_sym(&self) -> Option<ItemId> {
+	pub fn as_sym(self) -> Option<ItemId> {
 		let Self(val) = self;
-		(val & Self::PRE == 0).then_some(*val as ItemId)
+		(val & Self::PRE == 0).then_some(val as ItemId)
 	}
-	pub fn as_nb(&self) -> Option<u64> {
+	pub fn as_nb(self) -> Option<u64> {
 		let Self(val) = self;
 		(val & Self::NB_PRE != 0).then_some(val & !Self::NB_PRE)
 	}
-	pub fn as_obj(&self) -> Option<u64> {
+	pub fn as_obj(self) -> Option<u64> {
 		let Self(val) = self;
 		(val & Self::PRE == Self::OBJ_PRE).then_some(val & !Self::OBJ_PRE)
 	}
-	pub fn as_arr(&self) -> Option<u64> {
+	pub fn as_arr(self) -> Option<u64> {
 		let Self(val) = self;
 		(val & Self::PRE == Self::ARR_PRE).then_some(val & !Self::ARR_PRE)
 	}
-	pub fn is_sym(&self) -> bool {
+	pub fn is_sym(self) -> bool {
 		self.as_sym().is_some()
 	}
-	pub fn is_nb(&self) -> bool {
+	pub fn is_nb(self) -> bool {
 		self.as_nb().is_some()
 	}
-	pub fn is_obj(&self) -> bool {
+	pub fn is_obj(self) -> bool {
 		self.as_obj().is_some()
 	}
-	pub fn is_arr(&self) -> bool {
+	pub fn is_arr(self) -> bool {
 		self.as_arr().is_some()
 	}
 
-	pub fn id(&self) -> Option<u64> {
+	pub fn is_item(&self) -> bool {
+		self.id().is_some()
+	}
+	pub fn id(self) -> Option<u64> {
 		if self.0 & Self::OBJ_PRE != 0 { Some(self.0 & !Self::PRE) } else { None }
 	}
 
-	pub fn display(&self, buf: &mut String, pretty: bool, ident_level: usize, exec: &Execution) {
+	pub fn display(&self, pretty: bool, res: &ExecRes, pool: &ValuePool) -> String {
+		let mut buf = String::new();
+		self.display_item(&mut buf, pretty, 0, res, pool);
+		buf
+	}
+	pub fn display_item(
+		self, buf: &mut String, pretty: bool, ident_level: usize, res: &ExecRes, pool: &ValuePool,
+	) {
 		fn add_ident(buf: &mut String, pretty: bool, ident_level: usize) {
 			if pretty {
 				buf.push('\n');
@@ -94,17 +106,17 @@ impl Value {
 		}
 		match self.decompress() {
 			ValueDec::Nb(nb) => write!(buf, "{nb}").unwrap(),
-			ValueDec::Sym(id) => buf.push_str(&exec.symbols[id as usize].name.val),
+			ValueDec::Sym(id) => buf.push_str(&res.symbols[id as usize].name.val),
 			ValueDec::Arr(id) => {
-				let arr = &exec.pool[id as usize];
+				let arr = &pool.arr_pool[id as usize];
 				if arr.len() == 0 {
 					buf.push_str("[]");
 					return;
 				}
 				buf.push('[');
-				for item in arr.arr_items() {
+				for item in arr {
 					add_ident(buf, pretty, ident_level + 1);
-					item.display(buf, pretty, ident_level + 1, exec);
+					item.display_item(buf, pretty, ident_level + 1, res, pool);
 					buf.push_str(", ");
 				}
 				if !pretty {
@@ -115,17 +127,20 @@ impl Value {
 				buf.push(']');
 			}
 			ValueDec::Obj(id) => {
-				let pbj = &exec.pool[id as usize];
-				if pbj.len() == 0 {
+				let obj = &pool.obj_pool[id as usize];
+				if obj.len() == 0 {
 					buf.push_str("{}");
 					return;
 				}
 				buf.push('{');
-				for (key, value) in pbj.obj_items() {
+				for (field, value) in obj {
 					add_ident(buf, pretty, ident_level + 1);
-					buf.push_str(&exec.symbols[key as usize].name.val);
+					match field {
+						Field::Nb(nb) => write!(buf, "{nb}").unwrap(),
+						Field::Symbol(id) => buf.push_str(&res.symbols[*id as usize].name.val),
+					}
 					buf.push_str(": ");
-					value.display(buf, pretty, ident_level + 1, exec);
+					value.display_item(buf, pretty, ident_level + 1, res, pool);
 					buf.push_str(", ");
 				}
 				if !pretty {
@@ -139,135 +154,61 @@ impl Value {
 	}
 }
 
-const MAX_INLINE: usize = 12;
-#[derive(Debug)]
-pub enum ValueUnit {
-	Inline { len: u8, items: [Value; MAX_INLINE] },
-	Arr(Vec<Value>),
-	Obj(HashMap<ItemId, Value>),
+pub type Object = FxHashMap<Field, Value>;
+
+trait Clean {
+	fn clean(&mut self, shink_full: bool, max_cap: usize);
 }
-impl ValueUnit {
-	pub fn len(&self) -> usize {
-		match self {
-			Self::Inline { len, .. } => *len as usize,
-			Self::Arr(arr) => arr.len(),
-			Self::Obj(obj) => obj.len(),
+impl Clean for Vec<Value> {
+	fn clean(&mut self, shink_full: bool, max_cap: usize) {
+		self.clear();
+		if shink_full {
+			self.shrink_to(0);
+		} else if self.capacity() > max_cap {
+			self.shrink_to(max_cap);
 		}
-	}
-	pub fn map_get(&self, key: ItemId) -> Option<&Value> {
-		match self {
-			Self::Obj(map) => map.get(&key),
-			Self::Inline { len, items } => {
-				for ind in 0..*len as usize / 2 {
-					if items[ind * 2].as_sym() == Some(key) {
-						return Some(&items[ind * 2 + 1]);
-					}
-				}
-				None
-			}
-			_ => unreachable!(),
-		}
-	}
-	pub fn arr_get(&self, index: usize) -> Option<&Value> {
-		match self {
-			Self::Arr(arr) => arr.get(index),
-			Self::Inline { len, items } => (index < *len as usize).then(|| &items[index]),
-			_ => unreachable!(),
-		}
-	}
-	pub fn insert(&mut self, key: ItemId, value: Value) {
-		match self {
-			Self::Inline { len, items } => {
-				let lenn = *len as usize;
-				if lenn != MAX_INLINE {
-					items[lenn] = Value::new_sym(key);
-					items[lenn + 1] = value;
-					*len += 2;
-				} else {
-					let mut map = HashMap::with_capacity(MAX_INLINE / 2 + 1);
-					for ind in 0..MAX_INLINE / 2 {
-						map.insert(items[ind * 2].as_sym().unwrap(), items[ind * 2 + 1].clone());
-					}
-					map.insert(key, value);
-					*self = Self::Obj(map)
-				}
-			}
-			Self::Obj(map) => {
-				map.insert(key, value);
-			}
-			_ => unreachable!(),
-		}
-	}
-	pub fn push(&mut self, value: Value) {
-		match self {
-			Self::Inline { len, items } => {
-				let lenn = *len as usize;
-				if lenn != MAX_INLINE {
-					items[lenn] = value;
-					*len += 1;
-				} else {
-					let mut arr = Vec::with_capacity(MAX_INLINE + 1);
-					for ind in 0..MAX_INLINE {
-						arr.push(items[ind].clone());
-					}
-					arr.push(value);
-					*self = Self::Arr(arr)
-				}
-			}
-			Self::Arr(arr) => arr.push(value),
-			_ => unreachable!(),
-		}
-	}
-	pub fn arr_items(&self) -> impl Iterator<Item = &Value> {
-		match self {
-			Self::Inline { len, items } => items[0..*len as usize].iter(),
-			Self::Arr(arr) => arr.iter(),
-			_ => unreachable!(),
-		}
-	}
-	pub fn obj_items(&self) -> impl Iterator<Item = (ItemId, &Value)> {
-		enum Iter<'a> {
-			Inline(std::slice::Iter<'a, Value>),
-			Map(std::collections::hash_map::Iter<'a, ItemId, Value>),
-		}
-		let mut iter = match self {
-			Self::Inline { len, items } => Iter::Inline(items[0..*len as usize].iter()),
-			Self::Obj(obj) => Iter::Map(obj.iter()),
-			_ => unreachable!(),
-		};
-		std::iter::from_fn(move || match &mut iter {
-			Iter::Map(iter) => iter.next().map(|(k, v)| (*k, v)),
-			Iter::Inline(iter) => iter.next().map(|k| (k.as_sym().unwrap(), iter.next().unwrap())),
-		})
 	}
 }
-impl Default for ValueUnit {
-	fn default() -> Self {
-		ValueUnit::Inline { len: 0, items: [Value::DUMMY; MAX_INLINE] }
+impl Clean for Object {
+	fn clean(&mut self, shink_full: bool, max_cap: usize) {
+		self.clear();
+		if shink_full {
+			self.shrink_to(0);
+		} else if self.capacity() > max_cap {
+			self.shrink_to(max_cap);
+		}
 	}
 }
 
 #[derive(Debug)]
-struct Slot {
-	unit: ValueUnit,
+struct Slot<T> {
+	cell: UnsafeCell<T>,
 	is_active: bool,
+	refs: Cell<usize>,
 	next_free: usize,
 }
-
 #[derive(Debug)]
-pub struct ValuePool {
-	blocks: Vec<Box<[Slot]>>,
+pub struct TypedPool<T> {
+	blocks: Vec<Box<[Slot<T>]>>,
 	free_head: usize,
 	free_count: usize,
+	reserve_head: usize,
+	reserve_count: usize,
 }
-impl Default for ValuePool {
+impl<T: Default + Clean> Default for TypedPool<T> {
 	fn default() -> Self {
-		let mut pool = Self { blocks: Vec::new(), free_head: usize::MAX, free_count: 0 };
+		let mut pool = Self {
+			blocks: Vec::new(),
+			free_head: usize::MAX,
+			free_count: 0,
+			reserve_head: usize::MAX,
+			reserve_count: 0,
+		};
 		pool.add_block();
 		pool
 	}
 }
-impl ValuePool {
+impl<T> TypedPool<T> {
 	pub const MAX_CAP: usize = 32;
 	pub const MAX_FREE: usize = Self::BLOCK_SIZE;
 	pub const BLOCK_SIZE_POW: usize = 12;
@@ -277,96 +218,128 @@ impl ValuePool {
 		(index >> Self::BLOCK_SIZE_POW, index & (Self::BLOCK_SIZE - 1))
 	}
 	pub fn capacity(&self) -> usize {
-		self.blocks.len() >> Self::BLOCK_SIZE_POW
+		self.blocks.len() << Self::BLOCK_SIZE_POW
 	}
-	pub fn get(&self, index: usize) -> Option<&ValueUnit> {
+	pub fn get(&self, index: usize) -> Option<&T> {
 		let (high, low) = Self::split_index(index);
-		Some(&self.blocks.get(high)?.get(low)?.unit)
+		Some(unsafe { &*self.blocks.get(high)?.get(low)?.cell.get() })
 	}
-	pub fn get_mut(&mut self, index: usize) -> Option<&mut ValueUnit> {
+	pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
 		let (high, low) = Self::split_index(index);
-		Some(&mut self.blocks.get_mut(high)?.get_mut(low)?.unit)
+		Some(unsafe { &mut *self.blocks.get(high)?.get(low)?.cell.get() })
 	}
+}
+impl<T: Default + Clean> TypedPool<T> {
 	fn add_block(&mut self) {
+		let base_ind = self.capacity();
 		let mut block = Vec::with_capacity(Self::BLOCK_SIZE);
 		for ind in 0..Self::BLOCK_SIZE {
-			let slot =
-				Slot { unit: ValueUnit::default(), is_active: false, next_free: self.free_head };
-			self.free_head = ind + self.capacity();
+			let slot = Slot {
+				cell: UnsafeCell::new(T::default()),
+				is_active: false,
+				refs: Cell::new(0),
+				next_free: self.free_head,
+			};
+			self.free_head = ind + base_ind;
 			block.push(slot);
 		}
 		self.blocks.push(block.into_boxed_slice());
 		self.free_count += Self::BLOCK_SIZE;
 	}
-	fn alloc(&mut self) -> (&mut Slot, usize) {
-		if self.free_count == 0 {
+	fn clone_value(&self, index: usize) {
+		let (high, low) = Self::split_index(index);
+		let slot = &self.blocks[high][low];
+		slot.refs.update(|refs| refs + 1);
+	}
+	pub fn alloc(&mut self) -> (&UnsafeCell<T>, usize) {
+		if self.free_count == 0 && self.reserve_count == 0 {
 			self.add_block();
 		}
-		let index = self.free_head;
+
+		let (head, count) = match self.free_count == 0 {
+			true => (&mut self.reserve_head, &mut self.reserve_count),
+			false => (&mut self.free_head, &mut self.free_count),
+		};
+
+		let index = *head;
 		let (high, low) = Self::split_index(index);
 		let slot = &mut self.blocks[high][low];
 		slot.is_active = true;
-		self.free_head = slot.next_free;
-		(slot, index)
+		slot.refs.update(|refs| refs + 1);
+
+		*head = slot.next_free;
+		*count -= 1;
+
+		(&slot.cell, index)
 	}
-	fn free(&mut self, index: usize) {
+	pub fn free(&mut self, index: usize) {
 		let (high, low) = Self::split_index(index);
 		let slot = &mut self.blocks[high][low];
+		if !slot.is_active {
+			panic!("double free");
+		}
+		slot.refs.update(|refs| refs - 1);
+		if slot.refs.get() > 0 {
+			return;
+		}
+
+		let is_reserve = self.free_count >= Self::MAX_FREE;
 		slot.is_active = false;
-		slot.next_free = self.free_head;
-		self.free_head = index;
-		self.free_count += 1;
-		let mut to_free = Vec::new();
-		match &mut slot.unit {
-			ValueUnit::Inline { len, items } => {
-				for ind in 0..*len {
-					if let Some(id) = items[ind as usize].id() {
-						to_free.push(id)
-					}
-				}
-				*len = 0
-			}
-			ValueUnit::Arr(arr) => {
-				for item in &*arr {
-					if let Some(id) = item.id() {
-						to_free.push(id)
-					}
-				}
-				arr.clear();
-				if self.free_count >= Self::MAX_FREE {
-					arr.shrink_to(0);
-				} else if arr.capacity() > Self::MAX_CAP {
-					arr.shrink_to(Self::MAX_CAP);
-				}
-			}
-			ValueUnit::Obj(obj) => {
-				for item in obj.values() {
-					if let Some(id) = item.id() {
-						to_free.push(id)
-					}
-				}
-				obj.clear();
-				if self.free_count >= Self::MAX_FREE {
-					obj.shrink_to(0);
-				} else if obj.capacity() > Self::MAX_CAP / 2 {
-					obj.shrink_to(Self::MAX_CAP / 2);
-				}
-			}
-		}
-		for item in to_free {
-			self.free(item as usize);
-		}
+		unsafe { (*slot.cell.get()).clean(is_reserve, Self::MAX_CAP) };
+
+		let (head, count) = match is_reserve {
+			true => (&mut self.reserve_head, &mut self.reserve_count),
+			false => (&mut self.free_head, &mut self.free_count),
+		};
+		slot.next_free = *head;
+		*head = index;
+		*count += 1;
 	}
 }
 
-impl Index<usize> for ValuePool {
-	type Output = ValueUnit;
+impl<T> Index<usize> for TypedPool<T> {
+	type Output = T;
 	fn index(&self, index: usize) -> &Self::Output {
 		self.get(index).unwrap()
 	}
 }
-impl IndexMut<usize> for ValuePool {
+impl<T> IndexMut<usize> for TypedPool<T> {
 	fn index_mut(&mut self, index: usize) -> &mut Self::Output {
 		self.get_mut(index).unwrap()
+	}
+}
+
+#[derive(Debug)]
+pub struct ValuePool {
+	pub arr_pool: TypedPool<Vec<Value>>,
+	pub obj_pool: TypedPool<Object>,
+}
+impl ValuePool {
+	pub fn clone_value(&self, value: Value) -> Value {
+		match value.decompress() {
+			ValueDec::Arr(id) => self.arr_pool.clone_value(id as usize),
+			ValueDec::Obj(id) => self.obj_pool.clone_value(id as usize),
+			_ => (),
+		}
+		value
+	}
+	pub fn free_value(&mut self, value: Value) {
+		let to_free: Vec<_>;
+		match value.decompress() {
+			ValueDec::Arr(id) => {
+				let id = id as usize;
+				to_free = self.arr_pool[id].iter().copied().filter(Value::is_item).collect();
+				self.arr_pool.free(id);
+			}
+			ValueDec::Obj(id) => {
+				let id = id as usize;
+				to_free = self.obj_pool[id].values().copied().filter(Value::is_item).collect();
+				self.obj_pool.free(id);
+			}
+			_ => return,
+		}
+		for id in to_free {
+			self.free_value(id);
+		}
 	}
 }
