@@ -4,8 +4,8 @@ use compact_str::CompactString;
 
 use crate::{
 	exec::{
-		ArrItemPat, ArrayItem, Const, ExecRes, Expr, ExprId, ExprKind, Field, FieldPat, Fn, ItemId,
-		LocalId, MapArm, ObjectItem, Pat, PatId, PatKind, Stat, Symbol, SymbolKind,
+		ArrayItem, Const, ExecRes, Expr, ExprId, ExprKind, Field, FieldPat, Fn, ItemId, LocalId,
+		MapArm, ObjectItem, Pat, PatId, PatKind, Stat, Symbol, SymbolKind,
 	},
 	parser::{
 		ArrItemPat as ArrItemPatSrc, ArrayItem as ArrayItemSrc, Const as ConstSrc, Expr as ExprSrc,
@@ -380,13 +380,20 @@ fn resolve_pat(pat: &PatSrc, allow_let: bool, ctx: &mut ResolveCtx) -> Result<Pa
 		PatSrcKind::Object(items_src) => resolve_pat_obj(items_src, allow_let, ctx)?,
 		PatSrcKind::Array(items_src) => {
 			let mut items = Vec::with_capacity(items_src.len());
+			let mut rest = None;
 			for item in items_src {
-				items.push(match item {
-					ArrItemPatSrc::One(pat) => ArrItemPat::One(resolve_pat(pat, allow_let, ctx)?),
-					ArrItemPatSrc::Rest(pat) => ArrItemPat::Rest(resolve_pat(pat, allow_let, ctx)?),
-				});
+				if rest.is_some() {
+					return err!(
+						"resolve error: rest pattern must be the last",
+						(item.span(), ctx.src_path)
+					);
+				}
+				match item {
+					ArrItemPatSrc::One(pat) => items.push(resolve_pat(pat, allow_let, ctx)?),
+					ArrItemPatSrc::Rest(pat) => rest = Some(resolve_pat(pat, allow_let, ctx)?),
+				};
 			}
-			PatKind::Array(items.into_boxed_slice())
+			PatKind::Array(items.into_boxed_slice(), rest)
 		}
 		PatSrcKind::Or(pats_src) => {
 			let mut pats = Vec::with_capacity(pats_src.len());
@@ -469,13 +476,19 @@ fn resolve_expr_map(
 	expr: &ExprSrc, arms_src: &[MapArmSrc], ctx: &mut ResolveCtx,
 ) -> Result<ExprKind, Error> {
 	let expr = resolve_expr(expr, ctx)?;
-	let is_symbol = |ident| try_resolve_symbol(ident, &ctx.scopes).is_some();
-	if arms_src.iter().all(|arm| is_symbol(arm.pat.as_ident())) {
+	let is_simple = |pat: &PatSrc| {
+		try_resolve_symbol(pat.as_ident(), &ctx.scopes).is_some()
+			|| matches!(pat.kind, PatSrcKind::Nb(_))
+	};
+	if arms_src.iter().all(|arm| is_simple(&arm.pat)) {
 		let mut table = HashMap::with_capacity(arms_src.len());
 		for MapArmSrc { map, pat } in arms_src {
-			let symbol = ctx.scopes.items[&pat.as_ident().unwrap().val].1;
+			let pat = match pat.kind {
+				PatSrcKind::Nb(nb) => Field::Nb(nb),
+				_ => Field::Symbol(ctx.scopes.items[&pat.as_ident().unwrap().val].1),
+			};
 			let expr = resolve_expr(map, ctx)?;
-			table.insert(symbol, expr);
+			table.insert(pat, expr);
 		}
 		Ok(ExprKind::JumpTable(expr, Box::new(table)))
 	} else {

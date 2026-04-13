@@ -88,6 +88,37 @@ impl Value {
 		if self.0 & Self::OBJ_PRE != 0 { Some(self.0 & !Self::PRE) } else { None }
 	}
 
+	pub fn eq(value1: Value, value2: Value, pool: &ValuePool) -> bool {
+		match (value1.decompress(), value2.decompress()) {
+			(ValueDec::Nb(nba), ValueDec::Nb(nb2)) => nba == nb2,
+			(ValueDec::Sym(id1), ValueDec::Sym(id2)) => id1 == id2,
+			(ValueDec::Obj(id1), ValueDec::Obj(id2)) => {
+				let obj1 = &pool.obj_pool[id1 as usize];
+				let obj2 = &pool.obj_pool[id2 as usize];
+				for (field, value1) in obj1 {
+					if obj2.get(&field).is_none_or(|value2| !Value::eq(*value1, *value2, pool)) {
+						return false;
+					}
+				}
+				obj1.len() == obj2.len()
+			}
+			(ValueDec::Arr(id1), ValueDec::Arr(id2)) => {
+				let arr1 = &pool.arr_pool[id1 as usize];
+				let arr2 = &pool.arr_pool[id2 as usize];
+				if arr1.len() != arr2.len() {
+					return false;
+				}
+				for (ind, value1) in arr1.iter().enumerate() {
+					if !Value::eq(*value1, arr2[ind], pool) {
+						return false;
+					}
+				}
+				true
+			}
+			_ => false,
+		}
+	}
+
 	pub fn display(&self, pretty: bool, res: &ExecRes, pool: &ValuePool) -> String {
 		let mut buf = String::new();
 		self.display_item(&mut buf, pretty, 0, res, pool);
@@ -227,6 +258,10 @@ impl<T> TypedPool<T> {
 	pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
 		let (high, low) = Self::split_index(index);
 		Some(unsafe { &mut *self.blocks.get(high)?.get(low)?.cell.get() })
+	}
+	pub fn get_cell(&self, index: usize) -> &UnsafeCell<T> {
+		let (high, low) = Self::split_index(index);
+		&self.blocks[high][low].cell
 	}
 }
 impl<T: Default + Clean> TypedPool<T> {

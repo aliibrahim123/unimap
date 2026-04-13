@@ -9,7 +9,7 @@ use crate::{
 	parser::Ident,
 	tokenizer::Span,
 	utils::{Error, err},
-	value::{Object, TypedPool, Value, ValueDec, ValuePool},
+	value::{Value, ValueDec, ValuePool},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,7 +115,7 @@ pub enum ExprKind {
 	Index(ExprId, ExprId),
 	Object(Box<[ObjectItem]>),
 	Array(Box<[ArrayItem]>),
-	JumpTable(ExprId, Box<HashMap<ItemId, ExprId>>),
+	JumpTable(ExprId, Box<HashMap<Field, ExprId>>),
 	Map(ExprId, Box<[MapArm]>),
 	Pipe(Box<[ExprId]>),
 }
@@ -130,11 +130,6 @@ pub enum FieldPat {
 	Index(ExprId, PatId),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ArrItemPat {
-	One(PatId),
-	Rest(PatId),
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatKind {
 	Any,
 	Symbol { id: ItemId, is_enum: bool },
@@ -143,7 +138,7 @@ pub enum PatKind {
 	Local(LocalId),
 	Let(LocalId, PatId),
 	Object(Box<[FieldPat]>),
-	Array(Box<[ArrItemPat]>),
+	Array(Box<[PatId]>, Option<PatId>),
 	Or(Box<[PatId]>),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,39 +162,17 @@ impl Stat {
 
 #[derive(Debug)]
 struct Execution<'a> {
-	res: &'a ExecRes,
 	stat: &'a Stat,
-	pool: ValuePool,
-	stack: Vec<Value>,
+	pool: &'a mut ValuePool,
+	stack: &'a mut Vec<Value>,
 	frame_start: usize,
 	cur_value: Option<Value>,
-	src_path: usize,
-}
-fn exec_stat(stat: &Stat, ctx: &Execution) -> Result<Value, Error> {
-	todo!()
-}
-fn exec_expr_const(id: ItemId, exec: &mut Execution) -> Result<Value, Error> {
-	let Execution { res, pool, .. } = exec;
-	let Const { name, init, status, src_path } = &res.consts[id as usize];
-	match status.get() {
-		ConstStatus::Computed(value) => Ok(pool.clone_value(value)),
-		ConstStatus::Uninit => {
-			status.set(ConstStatus::Computing);
-			let value = exec_stat(init, exec)?;
-			status.set(ConstStatus::Computed(value));
-			Ok(value)
-		}
-		ConstStatus::Computing => err!(
-			"execution error: detected circular dependency at constant \"{name}\"",
-			(name.span, &res.file_names[*src_path])
-		),
-	}
+	src_path: &'a str,
 }
 fn exec_index(
-	value: Value, field: Field, span: Span, exec: &mut Execution,
+	value: Value, field: Field, span: Span, res: &ExecRes, exec: &mut Execution,
 ) -> Result<Value, Error> {
-	let Execution { res, pool, src_path, .. } = exec;
-	let src_path = &res.file_names[*src_path];
+	let Execution { pool, src_path, .. } = exec;
 	let result = match (value.decompress(), field) {
 		(ValueDec::Arr(id), Field::Nb(nb)) => match pool.arr_pool[id as usize].get(nb as usize) {
 			Some(value) => pool.clone_value(*value),
@@ -234,29 +207,134 @@ fn into_field(value: Value, span: Span, exec: &mut Execution) -> Result<Field, E
 		ValueDec::Sym(id) => Ok(Field::Symbol(id)),
 		index => {
 			let ty = if matches!(index, ValueDec::Arr(_)) { "array" } else { "object" };
-			err!(
-				"execution error: using an {ty} as index",
-				(span, &exec.res.file_names[exec.src_path])
-			)
+			err!("execution error: using an {ty} as index", (span, exec.src_path))
 		}
 	}
 }
-fn exec_expr_array(items: &[ArrayItem], exec: &mut Execution) -> Result<Value, Error> {
+fn resolve_const(id: ItemId, res: &ExecRes, exec: &mut Execution) -> Result<Value, Error> {
+	let Execution { pool, stack, .. } = exec;
+	let Const { name, init, status, src_path } = &res.consts[id as usize];
+	let src_path = &res.file_names[*src_path];
+	match status.get() {
+		ConstStatus::Computed(value) => Ok(value),
+		ConstStatus::Uninit => {
+			status.set(ConstStatus::Computing);
+			let mut exec = Execution {
+				stat: init,
+				cur_value: None,
+				frame_start: stack.len(),
+				src_path,
+				pool,
+				stack,
+			};
+			let value = exec_expr(init.root_expr, res, &mut exec)?;
+			status.set(ConstStatus::Computed(value));
+			Ok(value)
+		}
+		ConstStatus::Computing => err!(
+			"execution error: detected circular dependency at constant \"{name}\"",
+			(name.span, src_path)
+		),
+	}
+}
+fn exec_pat_array(
+	items: &[PatId], rest: &Option<PatId>, value: Value, res: &ExecRes, exec: &mut Execution,
+) -> Result<bool, Error> {
+	let Some(id) = value.as_arr() else { return Ok(false) };
+	let arr = unsafe { &*exec.pool.arr_pool.get_cell(id as usize).get() };
+	if arr.len() < items.len() {
+		return Ok(false);
+	}
+	for (index, item) in items.iter().enumerate() {
+		if !exec_pat(*item, arr[index], res, exec)? {
+			return Ok(false);
+		}
+	}
+	if let Some(pat) = rest {
+		let (slice, id) = exec.pool.arr_pool.alloc();
+		let slice = unsafe { &mut *slice.get() };
+		slice.extend(&arr[items.len()..]);
+		for value in slice {
+			exec.pool.clone_value(*value);
+		}
+		exec_pat(*pat, Value::new_arr(id as u64), res, exec)
+	} else {
+		Ok(items.len() == arr.len())
+	}
+}
+fn exec_pat_object(
+	fields: &[FieldPat], value: Value, res: &ExecRes, exec: &mut Execution,
+) -> Result<bool, Error> {
+	let Some(id) = value.as_obj() else { return Ok(false) };
+	let obj = unsafe { &*exec.pool.obj_pool.get_cell(id as usize).get() };
+
+	for field in fields {
+		let (field, pat) = match field {
+			FieldPat::Key(field, pat) => (*field, *pat),
+			FieldPat::Index(index, pat) => {
+				let index_span = exec.stat.exprs[*index as usize].span;
+				let field = into_field(exec_expr(*index, res, exec)?, index_span, exec)?;
+				(field, *pat)
+			}
+		};
+		let Some(value) = obj.get(&field) else { return Ok(false) };
+		if !exec_pat(pat, *value, res, exec)? {
+			return Ok(false);
+		}
+	}
+
+	Ok(true)
+}
+fn exec_pat(pat: PatId, value: Value, res: &ExecRes, exec: &mut Execution) -> Result<bool, Error> {
+	let Execution { stat, pool, stack, frame_start, .. } = exec;
+	let pat = &stat.pats[pat as usize];
+	Ok(match &pat.kind {
+		PatKind::Any => true,
+		PatKind::Nb(nb) => value.as_nb() == Some(*nb),
+		PatKind::Symbol { id, is_enum: false } => value.as_sym() == Some(*id),
+		PatKind::Symbol { id, is_enum: true } => {
+			let SymbolKind::Enum(vars) = &res.symbols[*id as usize].kind else { unreachable!() };
+			value.as_sym().map_or(false, |sym| vars.contains(&sym))
+		}
+		PatKind::Const(id) => Value::eq(resolve_const(*id, res, exec)?, value, exec.pool),
+		PatKind::Local(id) => Value::eq(stack[*frame_start + *id as usize], value, pool),
+		PatKind::Let(id, pat) => {
+			if !exec_pat(*pat, value, res, exec)? {
+				return Ok(false);
+			}
+			exec.stack[exec.frame_start + *id as usize] = exec.pool.clone_value(value);
+			true
+		}
+		PatKind::Array(items, rest) => exec_pat_array(items, rest, value, res, exec)?,
+		PatKind::Object(fields) => exec_pat_object(fields, value, res, exec)?,
+		PatKind::Or(pats) => {
+			for pat in pats {
+				if exec_pat(*pat, value, res, exec)? {
+					return Ok(true);
+				}
+			}
+			false
+		}
+	})
+}
+fn exec_expr_array(
+	items: &[ArrayItem], res: &ExecRes, exec: &mut Execution,
+) -> Result<Value, Error> {
 	let (arr, id) = exec.pool.arr_pool.alloc();
 	let arr = unsafe { &mut *arr.get() };
 	for item in items {
 		match item {
 			ArrayItem::One(expr) => {
-				let item = exec_expr(*expr, exec)?;
+				let item = exec_expr(*expr, res, exec)?;
 				arr.push(item);
 			}
 			ArrayItem::Spread(expr) => {
-				let other = exec_expr(*expr, exec)?;
-				let Execution { res, stat, pool, src_path, .. } = exec;
+				let other = exec_expr(*expr, res, exec)?;
+				let Execution { stat, pool, src_path, .. } = exec;
 				let Some(other_id) = other.as_arr() else {
 					return err!(
 						"execution error: can not spread non array value",
-						(stat.exprs[*expr as usize].span, &res.file_names[*src_path])
+						(stat.exprs[*expr as usize].span, src_path)
 					);
 				};
 				arr.extend(pool.arr_pool[other_id as usize].drain(..));
@@ -266,30 +344,32 @@ fn exec_expr_array(items: &[ArrayItem], exec: &mut Execution) -> Result<Value, E
 	}
 	Ok(Value::new_arr(id as u64))
 }
-fn exec_expr_object(items: &[ObjectItem], exec: &mut Execution) -> Result<Value, Error> {
+fn exec_expr_object(
+	items: &[ObjectItem], res: &ExecRes, exec: &mut Execution,
+) -> Result<Value, Error> {
 	let (obj, id) = exec.pool.obj_pool.alloc();
 	let obj = unsafe { &mut *obj.get() };
 	for item in items {
 		match item {
 			ObjectItem::KeyValue(field, value) => {
-				if let Some(value) = obj.insert(*field, exec_expr(*value, exec)?) {
+				if let Some(value) = obj.insert(*field, exec_expr(*value, res, exec)?) {
 					exec.pool.free_value(value)
 				}
 			}
 			ObjectItem::IndexValue(index, value) => {
 				let index_span = exec.stat.exprs[*index as usize].span;
-				let field = into_field(exec_expr(*index, exec)?, index_span, exec)?;
-				if let Some(value) = obj.insert(field, exec_expr(*value, exec)?) {
+				let field = into_field(exec_expr(*index, res, exec)?, index_span, exec)?;
+				if let Some(value) = obj.insert(field, exec_expr(*value, res, exec)?) {
 					exec.pool.free_value(value)
 				}
 			}
 			ObjectItem::Spread(expr) => {
-				let other = exec_expr(*expr, exec)?;
-				let Execution { res, stat, pool, src_path, .. } = exec;
+				let other = exec_expr(*expr, res, exec)?;
+				let Execution { stat, pool, src_path, .. } = exec;
 				let Some(other_id) = other.as_obj() else {
 					return err!(
 						"execution error: can not spread non object value",
-						(stat.exprs[*expr as usize].span, &res.file_names[*src_path])
+						(stat.exprs[*expr as usize].span, src_path)
 					);
 				};
 				let mut to_remove = Vec::new();
@@ -307,34 +387,92 @@ fn exec_expr_object(items: &[ObjectItem], exec: &mut Execution) -> Result<Value,
 	}
 	Ok(Value::new_obj(id as u64))
 }
-fn exec_expr(expr: ExprId, exec: &mut Execution) -> Result<Value, Error> {
-	let Execution { res, pool, stack, stat, cur_value, frame_start, src_path } = exec;
+fn exec_expr_call(
+	fun: ItemId, args_exprs: &[ExprId], res: &ExecRes, exec: &mut Execution,
+) -> Result<Value, Error> {
+	let Fn { body, src_path, .. } = &res.fns[fun as usize];
+	let frame_start = exec.stack.len();
+	let mut args = Vec::with_capacity(args_exprs.len());
+	for arg in args_exprs {
+		args.push(exec_expr(*arg, res, exec)?);
+	}
+	let mut exec = Execution {
+		stat: body,
+		cur_value: None,
+		frame_start,
+		src_path: &res.file_names[*src_path],
+		pool: exec.pool,
+		stack: exec.stack,
+	};
+	exec.stack.extend(args);
+	let ret = exec_expr(body.root_expr, res, &mut exec)?;
+	for value in exec.stack.drain(frame_start..) {
+		exec.pool.free_value(value);
+	}
+	Ok(ret)
+}
+fn exec_expr_map(
+	expr: ExprId, arms: &[MapArm], span: Span, res: &ExecRes, exec: &mut Execution,
+) -> Result<Value, Error> {
+	let value = exec_expr(expr, res, exec)?;
+	for arm in arms {
+		let stack_top = exec.stack.len();
+		if arm.stack_slots != 0 {
+			exec.stack.resize(stack_top + arm.stack_slots as usize, Value::DUMMY);
+		}
+		let res = exec_pat(arm.pat, value, res, exec)?.then(|| exec_expr(arm.expr, res, exec));
+		for value in exec.stack.drain(stack_top..) {
+			exec.pool.free_value(value);
+		}
+		if let Some(res) = res {
+			exec.pool.free_value(value);
+			return res;
+		}
+	}
+	err!("execution error: not exhaustive patterns", (span, exec.src_path))
+}
+fn exec_expr(expr: ExprId, res: &ExecRes, exec: &mut Execution) -> Result<Value, Error> {
+	let Execution { pool, stack, stat, cur_value, frame_start, src_path } = exec;
 	let expr = &stat.exprs[expr as usize];
 	let span = expr.span;
 	match &expr.kind {
 		ExprKind::Cur => match cur_value {
 			Some(value) => Ok(pool.clone_value(*value)),
-			None => err!(
-				"execution error: no intermediate value available",
-				(span, &res.file_names[*src_path])
-			),
+			None => err!("execution error: no intermediate value available", (span, src_path)),
 		},
 		ExprKind::Nb(nb) => Ok(Value::new_nb(*nb)),
 		ExprKind::Symbol(id) => Ok(Value::new_sym(*id)),
-		ExprKind::Const(id) => exec_expr_const(*id, exec),
-		ExprKind::Local(id) => Ok(pool.clone_value(stack[*frame_start + *id as usize])),
-		ExprKind::Field(expr, field) => exec_index(exec_expr(*expr, exec)?, *field, span, exec),
-		ExprKind::Index(expr, index) => {
-			let target = exec_expr(*expr, exec)?;
-			let field = into_field(exec_expr(*index, exec)?, span, exec)?;
-			exec_index(target, field, span, exec)
+		ExprKind::Const(id) => {
+			let value = resolve_const(*id, res, exec)?;
+			Ok(exec.pool.clone_value(value))
 		}
-		ExprKind::Array(items) => exec_expr_array(items, exec),
-		ExprKind::Object(items) => exec_expr_object(items, exec),
+		ExprKind::Local(id) => Ok(pool.clone_value(stack[*frame_start + *id as usize])),
+		ExprKind::Field(expr, field) => {
+			exec_index(exec_expr(*expr, res, exec)?, *field, span, res, exec)
+		}
+		ExprKind::Index(expr, index) => {
+			let target = exec_expr(*expr, res, exec)?;
+			let field = into_field(exec_expr(*index, res, exec)?, span, exec)?;
+			exec_index(target, field, span, res, exec)
+		}
+		ExprKind::Call(fun, args) => exec_expr_call(*fun, args, res, exec),
+		ExprKind::Array(items) => exec_expr_array(items, res, exec),
+		ExprKind::Object(items) => exec_expr_object(items, res, exec),
+		ExprKind::JumpTable(expr, table) => {
+			let value = exec_expr(*expr, res, exec)?;
+			let Ok(value) = into_field(value, exec.stat.exprs[*expr as usize].span, exec) else {
+				return err!("execution error: non exhaustive patterns", (span, exec.src_path));
+			};
+			let Some(value) = table.get(&value) else {
+				return err!("execution error: non exhaustive patterns", (span, exec.src_path));
+			};
+			exec_expr(*value, res, exec)
+		}
+		ExprKind::Map(expr, arms) => exec_expr_map(*expr, arms, span, res, exec),
 		ExprKind::Pipe(exprs) => {
 			let prev_value = *cur_value;
 			for (id, expr) in exprs.iter().enumerate() {
-				let value = exec_expr(*expr, exec)?;
+				let value = exec_expr(*expr, res, exec)?;
 				if id != 0 {
 					exec.pool.free_value(exec.cur_value.unwrap());
 				}
@@ -344,6 +482,5 @@ fn exec_expr(expr: ExprId, exec: &mut Execution) -> Result<Value, Error> {
 			exec.cur_value = prev_value;
 			Ok(value)
 		}
-		_ => todo!(),
 	}
 }

@@ -60,6 +60,14 @@ pub enum ArrItemPat {
 	One(Pat),
 	Rest(Pat),
 }
+impl ArrItemPat {
+	pub fn span(&self) -> Span {
+		match self {
+			ArrItemPat::One(pat) => pat.span,
+			ArrItemPat::Rest(pat) => pat.span,
+		}
+	}
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatKind {
 	Any,
