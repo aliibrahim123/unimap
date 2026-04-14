@@ -118,6 +118,7 @@ pub enum ExprKind {
 	JumpTable(ExprId, Box<HashMap<Field, ExprId>>),
 	Map(ExprId, Box<[MapArm]>),
 	Pipe(Box<[ExprId]>),
+	Dbg(ExprId),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pat {
@@ -160,15 +161,93 @@ impl Stat {
 	}
 }
 
+pub struct Print<'a> {
+	pub output: Option<&'a mut dyn std::io::Write>,
+	pub pretty: bool,
+}
+impl Debug for Print<'_> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("DebugPrint").field("pretty", &self.pretty).finish()
+	}
+}
 #[derive(Debug)]
-struct Execution<'a> {
+pub struct Execution<'a, 'b, 'c> {
 	stat: &'a Stat,
 	pool: &'a mut ValuePool,
 	stack: &'a mut Vec<Value>,
 	frame_start: usize,
 	cur_value: Option<Value>,
 	src_path: &'a str,
+	debug_print: &'c mut Print<'b>,
 }
+
+#[derive(Debug)]
+pub enum ExecMode {
+	Main(ItemId),
+	Const { init: ItemId, looper: ItemId },
+}
+
+pub fn exec(
+	res: ExecRes, mode: ExecMode, mut debug_print: Print, pretty_output: bool,
+) -> Result<String, Error> {
+	println!("{res:#?}");
+	let init_fn = &res.fns[match mode {
+		ExecMode::Main(main) => main,
+		ExecMode::Const { init, .. } => init,
+	} as usize];
+	let mut exec = Execution {
+		stat: &init_fn.body,
+		pool: &mut ValuePool::default(),
+		stack: &mut Vec::new(),
+		frame_start: 0,
+		cur_value: None,
+		src_path: &res.file_names[init_fn.src_path],
+		debug_print: &mut debug_print,
+	};
+	let final_value = match mode {
+		ExecMode::Main(_) => exec_expr(init_fn.body.root_expr, &res, &mut exec)?,
+		ExecMode::Const { looper, .. } => {
+			let mut cur_value = exec_expr(init_fn.body.root_expr, &res, &mut exec)?;
+
+			let looper = &res.fns[looper as usize];
+			exec.stat = &looper.body;
+			exec.cur_value = None;
+			exec.stack.push(cur_value);
+
+			let expect_ret = |exec: &Execution| {
+				err!(
+					"execution error: expected \"loop\" return to be `[continue / end, value]`",
+					(looper.name.span, exec.src_path)
+				)
+			};
+
+			loop {
+				cur_value = exec_expr(looper.body.root_expr, &res, &mut exec)?;
+				exec.pool.free_value(exec.stack[0]);
+
+				let Some(ret_id) = cur_value.as_arr() else { return expect_ret(&exec) };
+				let ret = &exec.pool.arr_pool[ret_id as usize];
+				if ret.len() != 2 {
+					return expect_ret(&exec);
+				}
+
+				let Some(control) = ret[0].as_sym() else { return expect_ret(&exec) };
+				match res.symbols[control as usize].name.val.as_str() {
+					"continue" => cur_value = exec.pool.clone_value(ret[1]),
+					"end" => break ret[1],
+					_ => return expect_ret(&exec),
+				}
+
+				exec.pool.free_value(Value::new_arr(ret_id));
+				exec.stack[0] = cur_value;
+				exec.cur_value = None;
+			}
+		}
+	};
+
+	Ok(final_value.display(pretty_output, &res, &exec.pool))
+}
+
 fn exec_index(
 	value: Value, field: Field, span: Span, res: &ExecRes, exec: &mut Execution,
 ) -> Result<Value, Error> {
@@ -219,15 +298,16 @@ fn resolve_const(id: ItemId, res: &ExecRes, exec: &mut Execution) -> Result<Valu
 		ConstStatus::Computed(value) => Ok(value),
 		ConstStatus::Uninit => {
 			status.set(ConstStatus::Computing);
-			let mut exec = Execution {
+			let mut exec_fork = Execution {
 				stat: init,
 				cur_value: None,
 				frame_start: stack.len(),
 				src_path,
 				pool,
 				stack,
+				debug_print: exec.debug_print,
 			};
-			let value = exec_expr(init.root_expr, res, &mut exec)?;
+			let value = exec_expr(init.root_expr, res, &mut exec_fork)?;
 			status.set(ConstStatus::Computed(value));
 			Ok(value)
 		}
@@ -257,7 +337,12 @@ fn exec_pat_array(
 		for value in slice {
 			exec.pool.clone_value(*value);
 		}
-		exec_pat(*pat, Value::new_arr(id as u64), res, exec)
+		let slice = Value::new_arr(id as u64);
+		let res = exec_pat(*pat, slice, res, exec)?;
+		if res == false {
+			exec.pool.free_value(slice);
+		}
+		Ok(res)
 	} else {
 		Ok(items.len() == arr.len())
 	}
@@ -372,16 +457,13 @@ fn exec_expr_object(
 						(stat.exprs[*expr as usize].span, src_path)
 					);
 				};
-				let mut to_remove = Vec::new();
-				for (field, value) in pool.obj_pool[other_id as usize].drain() {
-					if let Some(value) = obj.insert(field, value) {
-						to_remove.push(value)
+				let other_obj = unsafe { &*pool.obj_pool.get_cell(other_id as usize).get() };
+				for (field, value) in other_obj {
+					if let Some(value) = obj.insert(*field, pool.clone_value(*value)) {
+						pool.free_value(value);
 					}
 				}
-				exec.pool.free_value(other);
-				for value in to_remove {
-					exec.pool.free_value(value);
-				}
+				pool.free_value(other);
 			}
 		}
 	}
@@ -392,9 +474,9 @@ fn exec_expr_call(
 ) -> Result<Value, Error> {
 	let Fn { body, src_path, .. } = &res.fns[fun as usize];
 	let frame_start = exec.stack.len();
-	let mut args = Vec::with_capacity(args_exprs.len());
 	for arg in args_exprs {
-		args.push(exec_expr(*arg, res, exec)?);
+		let arg = exec_expr(*arg, res, exec)?;
+		exec.stack.push(arg);
 	}
 	let mut exec = Execution {
 		stat: body,
@@ -403,8 +485,8 @@ fn exec_expr_call(
 		src_path: &res.file_names[*src_path],
 		pool: exec.pool,
 		stack: exec.stack,
+		debug_print: exec.debug_print,
 	};
-	exec.stack.extend(args);
 	let ret = exec_expr(body.root_expr, res, &mut exec)?;
 	for value in exec.stack.drain(frame_start..) {
 		exec.pool.free_value(value);
@@ -432,7 +514,7 @@ fn exec_expr_map(
 	err!("execution error: not exhaustive patterns", (span, exec.src_path))
 }
 fn exec_expr(expr: ExprId, res: &ExecRes, exec: &mut Execution) -> Result<Value, Error> {
-	let Execution { pool, stack, stat, cur_value, frame_start, src_path } = exec;
+	let Execution { pool, stack, stat, cur_value, frame_start, src_path, .. } = exec;
 	let expr = &stat.exprs[expr as usize];
 	let span = expr.span;
 	match &expr.kind {
@@ -481,6 +563,18 @@ fn exec_expr(expr: ExprId, res: &ExecRes, exec: &mut Execution) -> Result<Value,
 			let value = exec.cur_value.unwrap();
 			exec.cur_value = prev_value;
 			Ok(value)
+		}
+		ExprKind::Dbg(expr) => {
+			let expr = exec_expr(*expr, res, exec)?;
+			if let Print { pretty, output: Some(out) } = exec.debug_print {
+				if write!(out, "{}", expr.display(*pretty, res, exec.pool)).is_err() {
+					return err!(
+						"execution error: failed to write to debug output",
+						(span, exec.src_path)
+					);
+				};
+			}
+			Ok(expr)
 		}
 	}
 }

@@ -1,14 +1,44 @@
-use std::fs::{canonicalize, read_to_string};
+use std::{
+	fmt::{Debug, Display},
+	fs::{File, canonicalize, create_dir_all, read_to_string, write},
+	io::{Write, stdout},
+	path::absolute,
+};
 
-use clap::Parser;
-use unimap::{Error, LoadResult, run};
+use clap::{Parser, ValueEnum};
+use unimap::{Error, LoadResult, Print, run};
 
+#[derive(ValueEnum, Debug, Clone, PartialEq, Eq)]
+enum DebugPrint {
+	Silent,
+	Stdout,
+	File,
+}
+impl Display for DebugPrint {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(match self {
+			DebugPrint::Silent => "silent",
+			DebugPrint::Stdout => "stdout",
+			DebugPrint::File => "file",
+		})
+	}
+}
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]
 struct Args {
 	#[arg(short, long)]
 	base_dir: Option<String>,
 	#[arg(short, long)]
 	entry: String,
+	#[arg(short, long, default_value_t = DebugPrint::Stdout)]
+	debug_print: DebugPrint,
+	#[arg(long, default_value_t = true)]
+	debug_pretty: bool,
+	#[arg(long)]
+	debug_file: Option<String>,
+	#[arg(short, long)]
+	outfile: Option<String>,
+	#[arg(short, long, default_value_t = true)]
+	pretty: bool,
 }
 
 fn main() {
@@ -17,7 +47,8 @@ fn main() {
 	}
 }
 fn mainer() -> Result<(), String> {
-	let Args { base_dir, entry } = Args::parse();
+	let Args { base_dir, entry, debug_file, debug_pretty, debug_print, outfile, pretty } =
+		Args::parse();
 	let (base_dir, mut entry) = match base_dir {
 		Some(base_dir) => {
 			let base = canonicalize(&base_dir).map_err(errors::read_dir(&base_dir))?;
@@ -40,11 +71,28 @@ fn mainer() -> Result<(), String> {
 		}
 	};
 
+	#[allow(unused)]
+	let mut file = None;
+	let debug_output: Option<&mut dyn std::io::Write> = match debug_print {
+		DebugPrint::File => {
+			let Some(debug_file) = debug_file else {
+				return Err("debug output file not specified".to_string());
+			};
+			let debug_path = absolute(&debug_file).map_err(errors::create_file(&debug_file))?;
+			create_dir_all(debug_path.parent().unwrap())
+				.map_err(errors::create_file(&debug_file))?;
+			file = Some(File::create(&debug_file).map_err(errors::create_file(&debug_file))?);
+			Some(&mut file.unwrap())
+		}
+		DebugPrint::Stdout => Some(&mut stdout()),
+		DebugPrint::Silent => None,
+	};
+	let debug_print = Print { output: debug_output, pretty: debug_pretty };
+
 	entry.set_extension("");
 	let root = entry.strip_prefix(&base_dir).unwrap();
 	let segments = root.components().map(|v| v.as_os_str().to_str().unwrap());
 	let root = unimap::Path::from_iter(segments);
-
 	let loader = |path: &unimap::Path, importer: &str| {
 		let mut path_full = base_dir.clone();
 		path_full.extend(path.segments.iter().map(|v| &v.val));
@@ -59,8 +107,14 @@ fn mainer() -> Result<(), String> {
 		};
 		Ok(LoadResult { file, path: path_full.to_str().unwrap().to_string() })
 	};
-	let ctx = run(&root, &loader).map_err(|err| err.to_string())?;
-	println!("ctx: {ctx:#?}");
+
+	let value = run(&root, &loader, debug_print, pretty).map_err(|err| err.to_string())?;
+
+	match outfile {
+		Some(file) => write(&file, value).map_err(errors::create_file(&file))?,
+		None => stdout().write_all(value.as_bytes()).map_err(errors::write_stdout)?,
+	}
+
 	Ok(())
 }
 
@@ -71,5 +125,11 @@ mod errors {
 	}
 	pub fn read_file<T>(path: &impl Display) -> impl FnOnce(T) -> String {
 		move |_| format!("unable to read file \"{path}\"")
+	}
+	pub fn create_file<T>(path: &impl Display) -> impl FnOnce(T) -> String {
+		move |_| format!("unable to create file \"{path}\"")
+	}
+	pub fn write_stdout<T>(_: T) -> String {
+		"unable to write to stdout".to_string()
 	}
 }

@@ -4,8 +4,8 @@ use compact_str::CompactString;
 
 use crate::{
 	exec::{
-		ArrayItem, Const, ExecRes, Expr, ExprId, ExprKind, Field, FieldPat, Fn, ItemId, LocalId,
-		MapArm, ObjectItem, Pat, PatId, PatKind, Stat, Symbol, SymbolKind,
+		ArrayItem, Const, ExecMode, ExecRes, Expr, ExprId, ExprKind, Field, FieldPat, Fn, ItemId,
+		LocalId, MapArm, ObjectItem, Pat, PatId, PatKind, Stat, Symbol, SymbolKind,
 	},
 	parser::{
 		ArrItemPat as ArrItemPatSrc, ArrayItem as ArrayItemSrc, Const as ConstSrc, Expr as ExprSrc,
@@ -229,8 +229,8 @@ impl<'a> Scopes<'a> {
 		&self.locals[self.local_top]
 	}
 	pub fn add_local(&mut self, name: CompactString) -> LocalId {
-		self.local_counter += 1;
 		self.locals[self.local_top].insert(name, self.local_counter);
+		self.local_counter += 1;
 		self.local_counter
 	}
 	pub fn pop_scope(&mut self) {
@@ -261,6 +261,19 @@ struct ResolveCtx<'a> {
 	pub var_map: &'a VarMap,
 	pub src_path: &'a str,
 }
+
+fn expect_args(
+	expected: u16, actual: u16, fun: &str, span: Span, src_path: &str,
+) -> Result<(), Error> {
+	if expected != actual {
+		return err!(
+			"resolve error: function \"{fun}\" expects {expected} arguments, {actual} was given",
+			(span, src_path)
+		);
+	}
+	Ok(())
+}
+
 fn resolve_field(field: &FieldKind, ctx: &ResolveCtx) -> Result<Field, Error> {
 	let ResolveCtx { scopes, src_path, .. } = ctx;
 	let field = match field {
@@ -414,24 +427,26 @@ fn resolve_expr_call(
 	if scopes.resolve_local(fun).is_some() {
 		return err!("resolve error: \"{fun}\" is not a function", (fun.span, src_path));
 	}
+	if fun.val == "dbg" {
+		expect_args(1, exprs.len() as u16, "dbg", fun.span, src_path)?;
+		return Ok(ExprKind::Dbg(resolve_expr(&exprs[0], ctx)?));
+	}
+
 	let (fun_type, fun_id) = scopes.resolve_item(fun, src_path)?;
 	if fun_type != ItemType::Fn {
 		return err!("resolve error: \"{fun}\" is not a function", (fun.span, src_path));
 	}
 
 	let args_expected = exec.fns[fun_id as usize].args_count;
-	let args_given = exprs.len();
-	if args_expected != exprs.len() as u16 {
-		return err!(
-			"resolve error: function \"{fun}\" expects {args_expected} arguments, {args_given} was given",
-			(fun.span, src_path)
-		);
-	}
+	expect_args(args_expected, exprs.len() as u16, &fun.val, fun.span, src_path)?;
 
 	let mut args = Vec::with_capacity(exprs.len());
 	for expr in exprs {
 		args.push(resolve_expr(expr, ctx)?);
+		ctx.scopes.local_counter += 1;
 	}
+	ctx.scopes.local_counter -= args.len() as LocalId;
+
 	Ok(ExprKind::Call(fun_id, args.into_boxed_slice()))
 }
 
@@ -548,7 +563,39 @@ fn resolve_expr(expr: &ExprSrc, ctx: &mut ResolveCtx) -> Result<ExprId, Error> {
 	Ok(id as ExprId)
 }
 
-pub fn resolve(root_path: &Path, loader: Loader) -> Result<ExecRes, Error> {
+fn resolve_file(
+	file: &mut File, file_src: &FileSrc, exec: &mut ExecRes, var_map: &mut VarMap,
+) -> Result<(), Error> {
+	let src_path = &file_src.path;
+	for (ind, id) in file.fns.iter().enumerate() {
+		let src = &file_src.fns[ind];
+		let mut body = Stat::new();
+		let mut scopes = Scopes::new(&file.top_scope);
+		for arg in &src.args {
+			if scopes.top().contains_key(&arg.val) {
+				return err!(
+					"resolve error: argument \"{arg}\" defined multiple times",
+					(arg.span, src_path)
+				);
+			}
+			scopes.add_local(arg.val.clone());
+		}
+		let mut res_ctx = ResolveCtx { stat: &mut body, exec: &exec, var_map, src_path, scopes };
+		body.root_expr = resolve_expr(&src.body, &mut res_ctx)?;
+		exec.fns[*id as usize].body = body;
+	}
+	for (ind, id) in file.consts.iter().enumerate() {
+		let src = &file_src.consts[ind];
+		let mut init = Stat::new();
+		let scopes = Scopes::new(&file.top_scope);
+		let mut res_ctx = ResolveCtx { stat: &mut init, exec: &exec, var_map, src_path, scopes };
+		init.root_expr = resolve_expr(&src.init, &mut res_ctx)?;
+		exec.consts[*id as usize].init = init;
+	}
+	Ok(())
+}
+
+pub fn resolve(root_path: &Path, loader: Loader) -> Result<(ExecRes, ExecMode), Error> {
 	let mut exec = ExecRes::default();
 
 	let mut path_tree = HashMap::new();
@@ -565,36 +612,33 @@ pub fn resolve(root_path: &Path, loader: Loader) -> Result<ExecRes, Error> {
 	}
 
 	for (file_id, file) in files.iter_mut().enumerate() {
-		let file_src = &files_src[file_id];
-		let src_path = &file_src.path;
-		for (ind, id) in file.fns.iter().enumerate() {
-			let src = &file_src.fns[ind];
-			let mut body = Stat::new();
-			let mut scopes = Scopes::new(&file.top_scope);
-			for arg in &src.args {
-				if scopes.top().contains_key(&arg.val) {
-					return err!(
-						"resolve error: argument \"{arg}\" defined multiple times",
-						(arg.span, src_path)
-					);
-				}
-				scopes.add_local(arg.val.clone());
-			}
-			let mut res_ctx =
-				ResolveCtx { stat: &mut body, exec: &exec, var_map, src_path, scopes };
-			body.root_expr = resolve_expr(&src.body, &mut res_ctx)?;
-			exec.fns[*id as usize].body = body;
-		}
-		for (ind, id) in file.consts.iter().enumerate() {
-			let src = &file_src.consts[ind];
-			let mut init = Stat::new();
-			let scopes = Scopes::new(&file.top_scope);
-			let mut res_ctx =
-				ResolveCtx { stat: &mut init, exec: &exec, var_map, src_path, scopes };
-			init.root_expr = resolve_expr(&src.init, &mut res_ctx)?;
-			exec.consts[*id as usize].init = init;
-		}
+		resolve_file(file, &files_src[file_id], &mut exec, var_map)?;
 	}
 
-	Ok(exec)
+	let root = files.last().unwrap();
+	let root_src = files_src.last().unwrap();
+	let find_fn = |name: &str| root_src.fns.iter().enumerate().find(|fun| fun.1.name.val == name);
+
+	let exec_mod = if let Some((id, fun)) = find_fn("main") {
+		expect_args(0, fun.args.len() as u16, "main", fun.name.span, &root_src.path)?;
+		ExecMode::Main(root.fns[id])
+	} else if let Some((loop_id, loop_fn)) = find_fn("loop") {
+		expect_args(0, loop_fn.args.len() as u16, "loop", loop_fn.name.span, &root_src.path)?;
+		let Some((init_id, init_fn)) = find_fn("init") else {
+			return err!(
+				"resolve error: expected an \"init\" function with \"loop\"",
+				(Span::none(), &root_src.path)
+			);
+		};
+
+		expect_args(0, init_fn.args.len() as u16, "init", init_fn.name.span, &root_src.path)?;
+		ExecMode::Const { init: root.fns[init_id], looper: root.fns[loop_id] }
+	} else {
+		return err!(
+			"resolve error: can not execute the program, expected a \"main\" or \"loop\" function",
+			(Span::none(), &root_src.path)
+		);
+	};
+
+	Ok((exec, exec_mod))
 }

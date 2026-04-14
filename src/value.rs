@@ -264,6 +264,7 @@ impl<T> TypedPool<T> {
 		&self.blocks[high][low].cell
 	}
 }
+#[allow(private_bounds)]
 impl<T: Default + Clean> TypedPool<T> {
 	fn add_block(&mut self) {
 		let base_ind = self.capacity();
@@ -310,13 +311,6 @@ impl<T: Default + Clean> TypedPool<T> {
 	pub fn free(&mut self, index: usize) {
 		let (high, low) = Self::split_index(index);
 		let slot = &mut self.blocks[high][low];
-		if !slot.is_active {
-			panic!("double free");
-		}
-		slot.refs.update(|refs| refs - 1);
-		if slot.refs.get() > 0 {
-			return;
-		}
 
 		let is_reserve = self.free_count >= Self::MAX_FREE;
 		slot.is_active = false;
@@ -329,6 +323,15 @@ impl<T: Default + Clean> TypedPool<T> {
 		slot.next_free = *head;
 		*head = index;
 		*count += 1;
+	}
+	pub fn unref(&self, index: usize) -> bool {
+		let (high, low) = Self::split_index(index);
+		let slot = &self.blocks[high][low];
+		if !slot.is_active {
+			panic!("double free");
+		}
+		slot.refs.update(|refs| refs - 1);
+		slot.refs.get() == 0
 	}
 }
 
@@ -344,7 +347,7 @@ impl<T> IndexMut<usize> for TypedPool<T> {
 	}
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ValuePool {
 	pub arr_pool: TypedPool<Vec<Value>>,
 	pub obj_pool: TypedPool<Object>,
@@ -359,22 +362,30 @@ impl ValuePool {
 		value
 	}
 	pub fn free_value(&mut self, value: Value) {
-		let to_free: Vec<_>;
 		match value.decompress() {
 			ValueDec::Arr(id) => {
 				let id = id as usize;
-				to_free = self.arr_pool[id].iter().copied().filter(Value::is_item).collect();
+				if !self.arr_pool.unref(id) {
+					return;
+				}
+				let arr = unsafe { &*self.arr_pool.get_cell(id as usize).get() };
+				for item in arr {
+					self.free_value(*item);
+				}
 				self.arr_pool.free(id);
 			}
 			ValueDec::Obj(id) => {
 				let id = id as usize;
-				to_free = self.obj_pool[id].values().copied().filter(Value::is_item).collect();
+				if !self.obj_pool.unref(id) {
+					return;
+				}
+				let obj = unsafe { &*self.obj_pool.get_cell(id as usize).get() };
+				for item in obj.values() {
+					self.free_value(*item);
+				}
 				self.obj_pool.free(id);
 			}
 			_ => return,
-		}
-		for id in to_free {
-			self.free_value(id);
 		}
 	}
 }
