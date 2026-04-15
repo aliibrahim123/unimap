@@ -1,12 +1,13 @@
 use crate::{exec::exec, resolve::resolve};
 
 mod exec;
-pub mod parser;
-pub mod resolve;
-pub mod tokenizer;
-pub mod utils;
+pub(crate) mod parser;
+pub(crate) mod resolve;
+pub(crate) mod tokenizer;
+pub(crate) mod utils;
 mod value;
 
+/// run a unimap source file, return the evaluated output sttringified
 pub fn run(
 	root_path: &Path, loader: Loader, debug_print: Print, pretty_output: bool,
 ) -> Result<String, Error> {

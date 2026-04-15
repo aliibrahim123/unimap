@@ -9,9 +9,17 @@ use rustc_hash::FxHashMap;
 
 use crate::exec::{ExecRes, Field, ItemId, SymbolKind};
 
+/// a unimap value compact inside a u64
+///
+/// from most significance:
+/// - `1xxxx...`: 63 bit number
+/// - `00xxx...`: 32 bit symbol id at low
+/// - `010xx...`: 61 bit object id
+/// - `011xx...`: 61 bit array id
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Value(u64);
 
+/// `Value` but decompressed
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueDec {
 	Sym(ItemId),
@@ -21,52 +29,53 @@ pub enum ValueDec {
 }
 
 impl Value {
-	pub const NB_PRE: u64 = 1 << 63;
-	pub const OBJ_PRE: u64 = 1 << 62;
-	pub const ARR_PRE: u64 = 0b11 << 61;
-	pub const PRE: u64 = 0b111 << 61;
+	pub const NB_PREFIX: u64 = 1 << 63;
+	pub const OBJ_PREFIX: u64 = 1 << 62;
+	pub const ARR_PREFIX: u64 = 0b11 << 61;
+	/// most significant 3 bit
+	pub const PREFIX: u64 = 0b111 << 61;
 	pub const DUMMY: Value = Value(0);
 
 	pub fn new_sym(id: ItemId) -> Self {
 		Self(id as u64)
 	}
 	pub fn new_nb(nb: u64) -> Self {
-		Self(nb | Self::NB_PRE)
+		Self(nb | Self::NB_PREFIX)
 	}
 	pub fn new_obj(id: u64) -> Self {
-		Self(id | Self::OBJ_PRE)
+		Self(id | Self::OBJ_PREFIX)
 	}
 	pub fn new_arr(id: u64) -> Self {
-		Self(id | Self::ARR_PRE)
+		Self(id | Self::ARR_PREFIX)
 	}
 
 	pub fn decompress(self) -> ValueDec {
 		let Self(val) = self;
-		if val & Self::NB_PRE != 0 {
-			ValueDec::Nb(val & !Self::NB_PRE)
-		} else if val & Self::ARR_PRE == 0 {
+		if val & Self::NB_PREFIX != 0 {
+			ValueDec::Nb(val & !Self::NB_PREFIX)
+		} else if val & Self::ARR_PREFIX == 0 {
 			ValueDec::Sym(val as ItemId)
-		} else if val & Self::ARR_PRE == Self::ARR_PRE {
-			ValueDec::Arr(val & !Self::ARR_PRE)
+		} else if val & Self::ARR_PREFIX == Self::ARR_PREFIX {
+			ValueDec::Arr(val & !Self::ARR_PREFIX)
 		} else {
-			ValueDec::Obj(val & !Self::OBJ_PRE)
+			ValueDec::Obj(val & !Self::OBJ_PREFIX)
 		}
 	}
 	pub fn as_sym(self) -> Option<ItemId> {
 		let Self(val) = self;
-		(val & Self::PRE == 0).then_some(val as ItemId)
+		(val & Self::PREFIX == 0).then_some(val as ItemId)
 	}
 	pub fn as_nb(self) -> Option<u64> {
 		let Self(val) = self;
-		(val & Self::NB_PRE != 0).then_some(val & !Self::NB_PRE)
+		(val & Self::NB_PREFIX != 0).then_some(val & !Self::NB_PREFIX)
 	}
 	pub fn as_obj(self) -> Option<u64> {
 		let Self(val) = self;
-		(val & Self::PRE == Self::OBJ_PRE).then_some(val & !Self::OBJ_PRE)
+		(val & Self::PREFIX == Self::OBJ_PREFIX).then_some(val & !Self::OBJ_PREFIX)
 	}
 	pub fn as_arr(self) -> Option<u64> {
 		let Self(val) = self;
-		(val & Self::PRE == Self::ARR_PRE).then_some(val & !Self::ARR_PRE)
+		(val & Self::PREFIX == Self::ARR_PREFIX).then_some(val & !Self::ARR_PREFIX)
 	}
 	pub fn is_sym(self) -> bool {
 		self.as_sym().is_some()
@@ -81,11 +90,13 @@ impl Value {
 		self.as_arr().is_some()
 	}
 
+	/// is object or array
 	pub fn is_item(&self) -> bool {
-		self.id().is_some()
+		self.item_id().is_some()
 	}
-	pub fn id(self) -> Option<u64> {
-		if self.0 & Self::OBJ_PRE != 0 { Some(self.0 & !Self::PRE) } else { None }
+	/// object / array id
+	pub fn item_id(self) -> Option<u64> {
+		if self.0 & Self::OBJ_PREFIX != 0 { Some(self.0 & !Self::PREFIX) } else { None }
 	}
 
 	pub fn eq(value1: Value, value2: Value, pool: &ValuePool) -> bool {
@@ -105,15 +116,12 @@ impl Value {
 			(ValueDec::Arr(id1), ValueDec::Arr(id2)) => {
 				let arr1 = &pool.arr_pool[id1 as usize];
 				let arr2 = &pool.arr_pool[id2 as usize];
-				if arr1.len() != arr2.len() {
-					return false;
-				}
 				for (ind, value1) in arr1.iter().enumerate() {
-					if !Value::eq(*value1, arr2[ind], pool) {
+					if arr2.get(ind).is_none_or(|value2| !Value::eq(*value1, *value2, pool)) {
 						return false;
 					}
 				}
-				true
+				arr1.len() == arr2.len()
 			}
 			_ => false,
 		}
@@ -156,12 +164,15 @@ impl Value {
 					buf.push_str("[]");
 					return;
 				}
+
 				buf.push('[');
 				for item in arr {
 					add_ident(buf, pretty, ident_level + 1);
 					item.display_item(buf, pretty, ident_level + 1, res, pool);
 					buf.push_str(", ");
 				}
+
+				// remove last ", " in not pretty since it look wrong
 				if !pretty {
 					buf.pop();
 					buf.pop();
@@ -175,6 +186,7 @@ impl Value {
 					buf.push_str("{}");
 					return;
 				}
+
 				buf.push('{');
 				for (field, value) in obj {
 					add_ident(buf, pretty, ident_level + 1);
@@ -186,6 +198,8 @@ impl Value {
 					value.display_item(buf, pretty, ident_level + 1, res, pool);
 					buf.push_str(", ");
 				}
+
+				// remove last ", " in not pretty since it look wrong
 				if !pretty {
 					buf.pop();
 					buf.pop();
@@ -199,13 +213,15 @@ impl Value {
 
 pub type Object = FxHashMap<Field, Value>;
 
+/// clear `TypedPool` item on free
 trait Clean {
-	fn clean(&mut self, shink_full: bool, max_cap: usize);
+	/// must shrink to 0 if `shrink_full` is `true`, else cap capacity to `max_cap`
+	fn clean(&mut self, shrink_full: bool, max_cap: usize);
 }
 impl Clean for Vec<Value> {
-	fn clean(&mut self, shink_full: bool, max_cap: usize) {
+	fn clean(&mut self, shrink_full: bool, max_cap: usize) {
 		self.clear();
-		if shink_full {
+		if shrink_full {
 			self.shrink_to(0);
 		} else if self.capacity() > max_cap {
 			self.shrink_to(max_cap);
@@ -213,9 +229,9 @@ impl Clean for Vec<Value> {
 	}
 }
 impl Clean for Object {
-	fn clean(&mut self, shink_full: bool, max_cap: usize) {
+	fn clean(&mut self, shrink_full: bool, max_cap: usize) {
 		self.clear();
-		if shink_full {
+		if shrink_full {
 			self.shrink_to(0);
 		} else if self.capacity() > max_cap {
 			self.shrink_to(max_cap);
@@ -223,16 +239,29 @@ impl Clean for Object {
 	}
 }
 
+/// a `TypedPool` slot, ref counted
 #[derive(Debug)]
 struct Slot<T> {
+	// unsafe cell since of prevous fights with the borrow checker
 	cell: UnsafeCell<T>,
 	is_active: bool,
+	// cell to make `ValuePool.clone_value` take self by ref
 	refs: Cell<usize>,
 	next_free: usize,
 }
+/// a pool for a specific type, overengineered for frequent allocations.
+///
+// allocate in big chunks, reuse allocations when possible, while capping the count and size of free allocations to reduce mem usage.
+//
+// slots can be:
+// - active: curently in use.
+// - free: inactive retaining its heap allocation for reuse.
+// - reserve: inactive without its heap allocation.
 #[derive(Debug)]
 pub struct TypedPool<T> {
+	// Vec<Box> to reduce the reallocation of the entirety of the pool
 	blocks: Vec<Box<[Slot<T>]>>,
+	// single linked list for free and reserve slots
 	free_head: usize,
 	free_count: usize,
 	reserve_head: usize,
@@ -252,11 +281,15 @@ impl<T: Default + Clean> Default for TypedPool<T> {
 	}
 }
 impl<T> TypedPool<T> {
+	/// max capacity of a free slot
 	pub const MAX_CAP: usize = 32;
+	/// max number of free slots
 	pub const MAX_FREE: usize = Self::BLOCK_SIZE;
+	// in power of 2 to make indexing efficient
 	pub const BLOCK_SIZE_POW: usize = 12;
 	pub const BLOCK_SIZE: usize = 2usize.pow(Self::BLOCK_SIZE_POW as u32);
 
+	// split index into block index and slot index
 	fn split_index(index: usize) -> (usize, usize) {
 		(index >> Self::BLOCK_SIZE_POW, index & (Self::BLOCK_SIZE - 1))
 	}
@@ -271,6 +304,7 @@ impl<T> TypedPool<T> {
 		let (high, low) = Self::split_index(index);
 		Some(unsafe { &mut *self.blocks.get(high)?.get(low)?.cell.get() })
 	}
+	/// only use when necessary
 	pub fn get_cell(&self, index: usize) -> &UnsafeCell<T> {
 		let (high, low) = Self::split_index(index);
 		&self.blocks[high][low].cell
@@ -281,6 +315,7 @@ impl<T: Default + Clean> TypedPool<T> {
 	fn add_block(&mut self) {
 		let base_ind = self.capacity();
 		let mut block = Vec::with_capacity(Self::BLOCK_SIZE);
+
 		for ind in 0..Self::BLOCK_SIZE {
 			let slot = Slot {
 				cell: UnsafeCell::new(T::default()),
@@ -291,9 +326,11 @@ impl<T: Default + Clean> TypedPool<T> {
 			self.free_head = ind + base_ind;
 			block.push(slot);
 		}
+
 		self.blocks.push(block.into_boxed_slice());
 		self.free_count += Self::BLOCK_SIZE;
 	}
+	/// shallow clone
 	fn clone_value(&self, index: usize) {
 		let (high, low) = Self::split_index(index);
 		let slot = &self.blocks[high][low];
@@ -304,6 +341,7 @@ impl<T: Default + Clean> TypedPool<T> {
 			self.add_block();
 		}
 
+		// use reserve if necessary
 		let (head, count) = match self.free_count == 0 {
 			true => (&mut self.reserve_head, &mut self.reserve_count),
 			false => (&mut self.free_head, &mut self.free_count),
@@ -320,6 +358,7 @@ impl<T: Default + Clean> TypedPool<T> {
 
 		(&slot.cell, index)
 	}
+	// split for `Value::drop_value`
 	pub fn free(&mut self, index: usize) {
 		let (high, low) = Self::split_index(index);
 		let slot = &mut self.blocks[high][low];
@@ -336,6 +375,7 @@ impl<T: Default + Clean> TypedPool<T> {
 		*head = index;
 		*count += 1;
 	}
+	/// drop an item, return if ready for free
 	pub fn unref(&self, index: usize) -> bool {
 		let (high, low) = Self::split_index(index);
 		let slot = &self.blocks[high][low];
@@ -359,12 +399,14 @@ impl<T> IndexMut<usize> for TypedPool<T> {
 	}
 }
 
+/// the array / object pool, overengineered for frequent allocations
 #[derive(Debug, Default)]
 pub struct ValuePool {
 	pub arr_pool: TypedPool<Vec<Value>>,
 	pub obj_pool: TypedPool<Object>,
 }
 impl ValuePool {
+	/// clone value by incrimenting ref if array / object
 	pub fn clone_value(&self, value: Value) -> Value {
 		match value.decompress() {
 			ValueDec::Arr(id) => self.arr_pool.clone_value(id as usize),
@@ -373,16 +415,19 @@ impl ValuePool {
 		}
 		value
 	}
-	pub fn free_value(&mut self, value: Value) {
+	/// drop value and free it if needed
+	pub fn drop_value(&mut self, value: Value) {
 		match value.decompress() {
 			ValueDec::Arr(id) => {
 				let id = id as usize;
 				if !self.arr_pool.unref(id) {
 					return;
 				}
+
+				// safe since values can not contain themself
 				let arr = unsafe { &*self.arr_pool.get_cell(id as usize).get() };
 				for item in arr {
-					self.free_value(*item);
+					self.drop_value(*item);
 				}
 				self.arr_pool.free(id);
 			}
@@ -391,9 +436,11 @@ impl ValuePool {
 				if !self.obj_pool.unref(id) {
 					return;
 				}
+
+				// safe since values can not contain themself
 				let obj = unsafe { &*self.obj_pool.get_cell(id as usize).get() };
 				for item in obj.values() {
-					self.free_value(*item);
+					self.drop_value(*item);
 				}
 				self.obj_pool.free(id);
 			}

@@ -222,7 +222,7 @@ pub fn exec(
 
 			loop {
 				cur_value = exec_expr(looper.body.root_expr, &res, &mut exec)?;
-				exec.pool.free_value(exec.stack[0]);
+				exec.pool.drop_value(exec.stack[0]);
 
 				let Some(ret_id) = cur_value.as_arr() else { return expect_ret(&exec) };
 				let ret = &exec.pool.arr_pool[ret_id as usize];
@@ -237,7 +237,7 @@ pub fn exec(
 					_ => return expect_ret(&exec),
 				}
 
-				exec.pool.free_value(Value::new_arr(ret_id));
+				exec.pool.drop_value(Value::new_arr(ret_id));
 				exec.stack[0] = cur_value;
 				exec.cur_value = None;
 			}
@@ -276,7 +276,7 @@ fn exec_index(
 			);
 		}
 	};
-	pool.free_value(value);
+	pool.drop_value(value);
 	Ok(result)
 }
 fn into_field(value: Value, span: Span, exec: &mut Execution) -> Result<Field, Error> {
@@ -338,7 +338,7 @@ fn exec_pat_array(
 		}
 		let slice = Value::new_arr(id as u64);
 		let res = exec_pat(*pat, slice, res, exec)?;
-		exec.pool.free_value(slice);
+		exec.pool.drop_value(slice);
 		Ok(res)
 	} else {
 		Ok(items.len() == arr.len())
@@ -403,12 +403,12 @@ fn exec_expr_array(
 	items: &[ArrayItem], res: &ExecRes, exec: &mut Execution,
 ) -> Result<Value, Error> {
 	let (arr, id) = exec.pool.arr_pool.alloc();
-	let arr = unsafe { &mut *arr.get() };
+	let arr = arr.get();
 	for item in items {
 		match item {
 			ArrayItem::One(expr) => {
 				let item = exec_expr(*expr, res, exec)?;
-				arr.push(item);
+				unsafe { (*arr).push(item) };
 			}
 			ArrayItem::Spread(expr) => {
 				let other = exec_expr(*expr, res, exec)?;
@@ -420,10 +420,10 @@ fn exec_expr_array(
 					);
 				};
 				for value in &pool.arr_pool[other_id as usize] {
-					arr.push(pool.clone_value(*value));
+					unsafe { (*arr).push(pool.clone_value(*value)) };
 				}
 
-				pool.free_value(other);
+				pool.drop_value(other);
 			}
 		}
 	}
@@ -433,19 +433,21 @@ fn exec_expr_object(
 	items: &[ObjectItem], res: &ExecRes, exec: &mut Execution,
 ) -> Result<Value, Error> {
 	let (obj, id) = exec.pool.obj_pool.alloc();
-	let obj = unsafe { &mut *obj.get() };
+	let obj = obj.get();
 	for item in items {
 		match item {
 			ObjectItem::KeyValue(field, value) => {
-				if let Some(value) = obj.insert(*field, exec_expr(*value, res, exec)?) {
-					exec.pool.free_value(value)
+				let value = exec_expr(*value, res, exec)?;
+				if let Some(value) = unsafe { (*obj).insert(*field, value) } {
+					exec.pool.drop_value(value)
 				}
 			}
 			ObjectItem::IndexValue(index, value) => {
 				let index_span = exec.stat.exprs[*index as usize].span;
 				let field = into_field(exec_expr(*index, res, exec)?, index_span, exec)?;
-				if let Some(value) = obj.insert(field, exec_expr(*value, res, exec)?) {
-					exec.pool.free_value(value)
+				let value = exec_expr(*value, res, exec)?;
+				if let Some(value) = unsafe { (*obj).insert(field, value) } {
+					exec.pool.drop_value(value)
 				}
 			}
 			ObjectItem::Spread(expr) => {
@@ -459,11 +461,12 @@ fn exec_expr_object(
 				};
 				let other_obj = unsafe { &*pool.obj_pool.get_cell(other_id as usize).get() };
 				for (field, value) in other_obj {
-					if let Some(value) = obj.insert(*field, pool.clone_value(*value)) {
-						pool.free_value(value);
+					let value = pool.clone_value(*value);
+					if let Some(value) = unsafe { (*obj).insert(*field, value) } {
+						pool.drop_value(value);
 					}
 				}
-				pool.free_value(other);
+				pool.drop_value(other);
 			}
 		}
 	}
@@ -489,7 +492,7 @@ fn exec_expr_call(
 	};
 	let ret = exec_expr(body.root_expr, res, &mut exec)?;
 	for value in exec.stack.drain(frame_start..) {
-		exec.pool.free_value(value);
+		exec.pool.drop_value(value);
 	}
 	Ok(ret)
 }
@@ -504,10 +507,10 @@ fn exec_expr_map(
 		}
 		let res = exec_pat(arm.pat, value, res, exec)?.then(|| exec_expr(arm.expr, res, exec));
 		for value in exec.stack.drain(stack_top..) {
-			exec.pool.free_value(value);
+			exec.pool.drop_value(value);
 		}
 		if let Some(res) = res {
-			exec.pool.free_value(value);
+			exec.pool.drop_value(value);
 			return res;
 		}
 	}
@@ -556,7 +559,7 @@ fn exec_expr(expr: ExprId, res: &ExecRes, exec: &mut Execution) -> Result<Value,
 			for (id, expr) in exprs.iter().enumerate() {
 				let value = exec_expr(*expr, res, exec)?;
 				if id != 0 {
-					exec.pool.free_value(exec.cur_value.unwrap());
+					exec.pool.drop_value(exec.cur_value.unwrap());
 				}
 				exec.cur_value = Some(value);
 			}

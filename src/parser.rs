@@ -22,6 +22,7 @@ impl Display for Ident {
 	}
 }
 
+/// `list<ident, '.'>` refering to an item
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Path {
 	pub segments: Vec<Ident>,
@@ -34,6 +35,7 @@ impl Path {
 	pub fn last(&self) -> &Ident {
 		self.segments.last().unwrap()
 	}
+	/// Empty path
 	pub fn root() -> Path {
 		Path { segments: vec![], span: Span::none() }
 	}
@@ -52,12 +54,17 @@ impl<T: Into<CompactString>> FromIterator<T> for Path {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldPat {
+	/// `field ':' pat`
+	///
+	/// there is also `"let" ident (':' pat)?` shorthand
 	Key(FieldKind, Pat),
+	/// `'[' expr ']' ':' pat`
 	Index(Expr, Pat),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArrItemPat {
 	One(Pat),
+	/// ".." pat
 	Rest(Pat),
 }
 impl ArrItemPat {
@@ -70,13 +77,20 @@ impl ArrItemPat {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatKind {
+	/// `'_'`
 	Any,
+	/// local, constant or symbol
 	Ident(Ident),
 	Nb(u64),
+	/// `ident '.' ident`
 	Enum(Ident, Box<Ident>),
+	/// `"let" ident ('=' pat)?`
 	Let(Ident, Box<Pat>),
+	/// `'{' list<field_pat, ','>? '}'`
 	Object(Vec<FieldPat>),
+	/// `'[' list<arr_item_pat, ','>? ']'`
 	Array(Vec<ArrItemPat>),
+	/// `list<pat, '|'>`
 	Or(Vec<Pat>),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +99,9 @@ pub struct Pat {
 	pub span: Span,
 }
 impl Pat {
+	pub fn any(span: Span) -> Pat {
+		Pat { kind: PatKind::Any, span }
+	}
 	pub fn as_ident(&self) -> Option<&Ident> {
 		match &self.kind {
 			PatKind::Ident(ident) => Some(ident),
@@ -95,13 +112,17 @@ impl Pat {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectItem {
+	/// `ident '=' expr`
 	KeyValue(FieldKind, Expr),
+	/// `'[' expr ']' '=' expr`
 	IndexValue(Expr, Expr),
+	/// `".." expr`
 	Spread(Expr),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArrayItem {
 	One(Expr),
+	/// `".." expr`
 	Spread(Expr),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,15 +137,24 @@ pub enum FieldKind {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExprKind {
+	/// `'_'`
 	Cur,
+	/// constant, local or symbol
 	Ident(Ident),
 	Nb(u64),
+	/// `ident '(' list<expr, ','>? ')'`
 	Call(Ident, Vec<Expr>),
+	/// `'{' list<object_item, ','>? '}'`
 	Object(Vec<ObjectItem>),
+	/// `'[' list<expr, ','>? ']'`
 	Array(Vec<ArrayItem>),
+	/// `expr '.' field`
 	Field(Box<Expr>, FieldKind),
+	/// `expr '[' expr ']'`
 	Index(Box<Expr>, Box<Expr>),
+	/// `expr ':' '{' list<pat "=>" expr, ','> '}'`
 	Map(Box<Expr>, Vec<MapArm>),
+	/// `list<expr, "|>">`
 	Pipe(Vec<Expr>),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,11 +171,13 @@ impl Expr {
 	}
 }
 
+/// `"import" path '{' list<ident, ','> '} ';''`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Import {
 	pub path: Path,
 	pub items: Vec<Ident>,
 }
+/// `"symbol" list<symbol_kind, ','> ';'`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Symbol {
 	pub name: Ident,
@@ -153,14 +185,18 @@ pub struct Symbol {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymbolKind {
+	/// `ident`
 	Atom,
+	/// `ident '{' list<ident, ','> '}'`
 	Enum(Vec<Ident>),
 }
+/// `"let" ident = expr ';'`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Const {
 	pub name: Ident,
 	pub init: Expr,
 }
+/// `"fn" ident '(' list<ident, ','>? ')' "=>" expr ';'`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fn {
 	pub name: Ident,
@@ -168,6 +204,7 @@ pub struct Fn {
 	pub body: Expr,
 }
 
+/// `(import | symbol | const | fn)+`
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct File {
 	pub path: String,
@@ -177,6 +214,7 @@ pub struct File {
 	pub fns: Vec<Fn>,
 }
 
+/// smart tokens index
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Cursor<'a> {
 	pub tokens: &'a [Token<'a>],
@@ -203,6 +241,7 @@ impl<'a> Cursor<'a> {
 	pub fn test(&self, kind: TokenKind) -> bool {
 		self.peek().kind == kind
 	}
+	/// a span from `start` till `self.last()`
 	pub fn span_from(&self, start: Span) -> Span {
 		start.join(self.last().span)
 	}
@@ -224,6 +263,7 @@ impl<'a> Cursor<'a> {
 		self.skip();
 		true
 	}
+	/// like `try_eat` but returns a span
 	pub fn try_consume(&self, kind: TokenKind) -> Option<Span> {
 		let token = self.peek();
 		(token.kind == kind).then(|| {
@@ -274,9 +314,11 @@ fn parse_path<'a>(cur: &Cursor<'a>) -> Result<Path, Error> {
 	while cur.try_eat(TokenKind::Dot) {
 		path.push(cur.consume_ident()?);
 	}
+
 	let span = start_span.join(path.last().unwrap().span);
 	Ok(Path { segments: path, span })
 }
+/// parse `start list<!~end item, sep> sep? end`
 fn parse_delim_list<T>(
 	cur: &Cursor, start: TokenKind, end: TokenKind, sep: TokenKind,
 	item_parser: impl std::ops::Fn(&Cursor) -> Result<T, Error>,
@@ -295,46 +337,63 @@ fn parse_delim_list<T>(
 	Ok(items)
 }
 
+fn parse_field(cur: &Cursor) -> Result<FieldKind, Error> {
+	if let Some((nb, _)) = cur.try_consume_nb() {
+		Ok(FieldKind::Nb(nb))
+	} else {
+		Ok(FieldKind::Ident(cur.consume_ident()?))
+	}
+}
+
 fn parse_pat_obj(cur: &Cursor) -> Result<Pat, Error> {
 	let start_span = cur.peek().span;
 	let items = parse_delim_list(cur, BraceOpen, BraceClose, Comma, |cur| {
+		// [index]: pat
 		if cur.try_eat(BracketOpen) {
 			let index = parse_expr(cur)?;
 			cur.consume(BracketClose)?;
 			cur.consume(Colon)?;
 			let pat = parse_pat(cur)?;
 			Ok(FieldPat::Index(index, pat))
-		} else if let Some(let_span) = cur.try_consume(Let) {
+		}
+		// let shorthand
+		else if let Some(let_span) = cur.try_consume(Let) {
 			let field = cur.consume_ident()?;
 			let pat = if cur.try_eat(Colon) {
 				parse_pat(cur)?
 			} else {
-				Pat { span: let_span.join(field.span), kind: PatKind::Any }
+				// let ident shorthand
+				Pat::any(let_span.join(field.span))
 			};
+
 			let let_pat = Pat {
 				span: let_span.join(pat.span),
 				kind: PatKind::Let(field.clone(), Box::new(pat)),
 			};
 			Ok(FieldPat::Key(FieldKind::Ident(field), let_pat))
-		} else {
-			let field = if let Some((nb, _)) = cur.try_consume_nb() {
-				FieldKind::Nb(nb)
-			} else {
-				FieldKind::Ident(cur.consume_ident()?)
-			};
+		}
+		// field: pat
+		else {
+			let field = parse_field(cur)?;
 			cur.consume(Colon)?;
 			let pat = parse_pat(cur)?;
 			Ok(FieldPat::Key(field, pat))
 		}
 	})?;
+
 	Ok(Pat { span: cur.span_from(start_span), kind: PatKind::Object(items) })
 }
 fn parse_pat_primary(cur: &Cursor) -> Result<Pat, Error> {
+	// _
 	if let Some(span) = cur.try_consume(Dash) {
 		Ok(Pat { span, kind: PatKind::Any })
-	} else if let Some((nb, span)) = cur.try_consume_nb() {
+	}
+	// nb
+	else if let Some((nb, span)) = cur.try_consume_nb() {
 		Ok(Pat { kind: PatKind::Nb(nb), span })
-	} else if let Some(ident) = cur.try_consume_ident() {
+	}
+	// ident / enum
+	else if let Some(ident) = cur.try_consume_ident() {
 		if cur.try_eat(Dot) {
 			let var = cur.consume_ident()?;
 			let span = ident.span.join(var.span);
@@ -342,27 +401,35 @@ fn parse_pat_primary(cur: &Cursor) -> Result<Pat, Error> {
 		} else {
 			Ok(Pat { span: ident.span, kind: PatKind::Ident(ident) })
 		}
-	} else if let Some(let_span) = cur.try_consume(Let) {
+	}
+	// let
+	else if let Some(let_span) = cur.try_consume(Let) {
 		let ident = cur.consume_ident()?;
 		let pat = if cur.try_eat(Colon) {
 			parse_pat(cur)?
 		} else {
-			Pat { span: let_span.join(ident.span), kind: PatKind::Any }
+			// let ident shorthand
+			Pat::any(let_span.join(ident.span))
 		};
 		let span = let_span.join(pat.span);
 		Ok(Pat { span, kind: PatKind::Let(ident, Box::new(pat)) })
-	} else if cur.test(BraceOpen) {
+	}
+	// object
+	else if cur.test(BraceOpen) {
 		parse_pat_obj(cur)
-	} else if cur.test(BracketOpen) {
+	}
+	// array
+	else if cur.test(BracketOpen) {
 		let start_span = cur.peek().span;
 		let items = parse_delim_list(cur, BracketOpen, BracketClose, Comma, |cur| {
 			if let Some(rest_span) = cur.try_consume(Dot) {
 				cur.consume(Dot)?;
+				// `..` shorthand
 				if cur.test(Comma) || cur.test(BracketClose) {
-					let any = Pat { span: cur.span_from(rest_span), kind: PatKind::Any };
-					return Ok(ArrItemPat::Rest(any));
+					Ok(ArrItemPat::Rest(Pat::any(cur.span_from(rest_span))))
+				} else {
+					Ok(ArrItemPat::Rest(parse_pat(cur)?))
 				}
-				Ok(ArrItemPat::Rest(parse_pat(cur)?))
 			} else {
 				Ok(ArrItemPat::One(parse_pat(cur)?))
 			}
@@ -378,32 +445,34 @@ fn parse_pat(cur: &Cursor) -> Result<Pat, Error> {
 	if !cur.test(Or) {
 		return Ok(pat);
 	}
+
 	let mut pats = vec![pat];
 	while cur.try_eat(Or) {
 		pats.push(parse_pat_primary(cur)?);
 	}
+
 	Ok(Pat { kind: PatKind::Or(pats), span: cur.span_from(start_span) })
 }
 
 fn parse_expr_obj(cur: &Cursor) -> Result<Expr, Error> {
 	let start_span = cur.peek().span;
 	let items = parse_delim_list(cur, BraceOpen, BraceClose, Comma, |cur| {
+		// `..`
 		if cur.try_eat(Dot) {
 			cur.consume(Dot)?;
 			return Ok(ObjectItem::Spread(parse_expr(cur)?));
 		}
-		if cur.try_eat(BracketOpen) {
+		// [index] = value
+		else if cur.try_eat(BracketOpen) {
 			let index = parse_expr(cur)?;
 			cur.consume(BracketClose)?;
 			cur.consume(Eq)?;
 			let value = parse_expr(cur)?;
 			Ok(ObjectItem::IndexValue(index, value))
-		} else {
-			let field = if let Some((nb, _)) = cur.try_consume_nb() {
-				FieldKind::Nb(nb)
-			} else {
-				FieldKind::Ident(cur.consume_ident()?)
-			};
+		}
+		// field = value
+		else {
+			let field = parse_field(cur)?;
 			cur.consume(Eq)?;
 			let value = parse_expr(cur)?;
 			Ok(ObjectItem::KeyValue(field, value))
@@ -412,22 +481,29 @@ fn parse_expr_obj(cur: &Cursor) -> Result<Expr, Error> {
 	Ok(Expr { span: cur.span_from(start_span), kind: ExprKind::Object(items) })
 }
 fn parse_expr_primary(cur: &Cursor) -> Result<Expr, Error> {
+	// _
 	if let Some(span) = cur.try_consume(Dash) {
 		Ok(Expr { span, kind: ExprKind::Cur })
-	} else if let Some((nb, span)) = cur.try_consume_nb() {
+	}
+	// nb
+	else if let Some((nb, span)) = cur.try_consume_nb() {
 		Ok(Expr { span, kind: ExprKind::Nb(nb) })
-	} else if let Some(ident) = cur.try_consume_ident() {
+	}
+	// local, constant, symbol or call
+	else if let Some(ident) = cur.try_consume_ident() {
 		if cur.test(ParenOpen) {
-			let args = parse_delim_list(cur, ParenOpen, ParenClose, Comma, |cur| {
-				return parse_expr(cur);
-			})?;
+			let args = parse_delim_list(cur, ParenOpen, ParenClose, Comma, |cur| parse_expr(cur))?;
 			Ok(Expr { span: cur.span_from(ident.span), kind: ExprKind::Call(ident, args) })
 		} else {
 			Ok(ident.into_expr())
 		}
-	} else if cur.test(BraceOpen) {
+	}
+	// object
+	else if cur.test(BraceOpen) {
 		parse_expr_obj(cur)
-	} else if cur.test(BracketOpen) {
+	}
+	// array
+	else if cur.test(BracketOpen) {
 		let start_span = cur.peek().span;
 		let items = parse_delim_list(cur, BracketOpen, BracketClose, Comma, |cur| {
 			if cur.try_eat(Dot) {
@@ -446,18 +522,19 @@ fn parse_expr_postfix(cur: &Cursor) -> Result<Expr, Error> {
 	let mut expr = parse_expr_primary(cur)?;
 	loop {
 		let start_span = expr.span;
-		let kind = if cur.try_eat(Dot) {
-			let field = if let Some((nb, _)) = cur.try_consume_nb() {
-				FieldKind::Nb(nb)
-			} else {
-				FieldKind::Ident(cur.consume_ident()?)
-			};
-			ExprKind::Field(Box::new(expr), field)
-		} else if cur.try_eat(BracketOpen) {
+		let kind = 
+		// expr.field
+		if cur.try_eat(Dot) {
+			ExprKind::Field(Box::new(expr), parse_field(cur)?)
+		} 
+		// expr[index]
+		else if cur.try_eat(BracketOpen) {
 			let index = parse_expr(cur)?;
 			cur.consume(BracketClose)?;
 			ExprKind::Index(Box::new(expr), Box::new(index))
-		} else if cur.try_eat(Colon) {
+		} 
+		// expr: { pat => expr, .. }
+		else if cur.try_eat(Colon) {
 			let brace_start = cur.peek().span;
 			let arms = parse_delim_list(cur, BraceOpen, BraceClose, Comma, |cur| {
 				let pat = parse_pat(cur)?;
@@ -485,6 +562,7 @@ fn parse_expr(cur: &Cursor) -> Result<Expr, Error> {
 	if !cur.test(Pipe) {
 		return Ok(expr);
 	}
+
 	let mut exprs = vec![expr];
 	while cur.try_eat(Pipe) {
 		exprs.push(parse_expr_postfix(cur)?);
@@ -494,19 +572,17 @@ fn parse_expr(cur: &Cursor) -> Result<Expr, Error> {
 
 fn parse_import(cur: &Cursor) -> Result<Import, Error> {
 	let path = parse_path(cur)?;
-	let items = parse_delim_list(cur, BraceOpen, BraceClose, Comma, |cur| {
-		return cur.consume_ident();
-	})?;
+	let items = parse_delim_list(cur, BraceOpen, BraceClose, Comma, |cur| cur.consume_ident())?;
 	cur.consume(SemiColon)?;
 	Ok(Import { path, items })
 }
 fn parse_symbol(cur: &Cursor, symbols: &mut Vec<Symbol>) -> Result<(), Error> {
 	loop {
-		let name = cur.consume_ident()?;
+		let name = cur.consume_ident()?;  
 		if cur.test(BraceOpen) {
-			let items = parse_delim_list(cur, BraceOpen, BraceClose, Comma, |cur| {
-				return cur.consume_ident();
-			})?;
+			let items = parse_delim_list(cur, BraceOpen, BraceClose, Comma, |cur| 
+				cur.consume_ident()
+			)?;
 			symbols.push(Symbol { name, kind: SymbolKind::Enum(items) });
 		} else {
 			symbols.push(Symbol { name, kind: SymbolKind::Atom });
@@ -548,7 +624,7 @@ pub fn parse_file(source: &str, src_path: &str) -> Result<File, Error> {
 			Let => file.consts.push(parse_const(&cur)?),
 			Fn => file.fns.push(parse_fn(&cur)?),
 			_ => {
-				let expected = "a top level decleration";
+				let expected = "a top level declaration";
 				return unexpected_token(cur_token, expected, cur_token.span, src_path);
 			}
 		}

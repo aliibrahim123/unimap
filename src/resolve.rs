@@ -624,7 +624,7 @@ pub fn resolve(root_path: &Path, loader: Loader) -> Result<(ExecRes, ExecMode), 
 		expect_args(0, fun.args.len() as u16, "main", fun.name.span, &root_src.path)?;
 		ExecMode::Main(root.fns[id])
 	} else if let Some((loop_id, loop_fn)) = find_fn("loop") {
-		expect_args(0, loop_fn.args.len() as u16, "loop", loop_fn.name.span, &root_src.path)?;
+		expect_args(1, loop_fn.args.len() as u16, "loop", loop_fn.name.span, &root_src.path)?;
 		let Some((init_id, init_fn)) = find_fn("init") else {
 			return err!(
 				"resolve error: expected an \"init\" function with \"loop\"",

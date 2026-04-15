@@ -2,9 +2,13 @@ use std::fmt::{Display, Write};
 
 use crate::tokenizer::Span;
 
+/// extensions for strings
 pub trait StrExt {
+	/// get the char at the given byte index
 	fn char_at(&self, index: usize) -> Option<char>;
+	/// find the byte index of the first char after the given char
 	fn find_after(&self, pat: char, index: usize) -> Option<usize>;
+	/// find the byte index of the first char after the given string
 	fn find_after_str(&self, pat: &str, index: usize) -> Option<usize>;
 }
 impl StrExt for str {
@@ -19,11 +23,13 @@ impl StrExt for str {
 	}
 }
 
+/// the error type
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
 	pub msg: Box<str>,
 	pub span: Span,
 }
+impl std::error::Error for Error {}
 impl Error {
 	pub fn new(mut msg: String, span: Span, at: &str) -> Self {
 		write!(msg, "\n  --> {at}").unwrap();
@@ -39,6 +45,7 @@ impl Display for Error {
 		write!(f, "{}", self.msg)
 	}
 }
+/// just an helper
 macro_rules! err {
 	($msg:expr, ($span:expr, $at:expr)) => {
 		Err(crate::utils::Error::new(format!($msg), $span, $at))
