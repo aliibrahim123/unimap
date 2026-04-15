@@ -7,7 +7,7 @@ use std::{
 
 use rustc_hash::FxHashMap;
 
-use crate::exec::{ExecRes, Field, ItemId};
+use crate::exec::{ExecRes, Field, ItemId, SymbolKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Value(u64);
@@ -96,7 +96,7 @@ impl Value {
 				let obj1 = &pool.obj_pool[id1 as usize];
 				let obj2 = &pool.obj_pool[id2 as usize];
 				for (field, value1) in obj1 {
-					if obj2.get(&field).is_none_or(|value2| !Value::eq(*value1, *value2, pool)) {
+					if obj2.get(field).is_none_or(|value2| !Value::eq(*value1, *value2, pool)) {
 						return false;
 					}
 				}
@@ -135,9 +135,21 @@ impl Value {
 				}
 			}
 		}
+		fn display_symbol(buf: &mut String, id: ItemId, res: &ExecRes) {
+			let sym = &res.symbols[id as usize];
+			match sym.kind {
+				SymbolKind::Atom => buf.push_str(&sym.name.val),
+				SymbolKind::Var(enum_id) => {
+					buf.push_str(&res.symbols[enum_id as usize].name.val);
+					buf.push('.');
+					buf.push_str(&sym.name.val);
+				}
+				_ => unreachable!(),
+			}
+		}
 		match self.decompress() {
 			ValueDec::Nb(nb) => write!(buf, "{nb}").unwrap(),
-			ValueDec::Sym(id) => buf.push_str(&res.symbols[id as usize].name.val),
+			ValueDec::Sym(id) => display_symbol(buf, id, res),
 			ValueDec::Arr(id) => {
 				let arr = &pool.arr_pool[id as usize];
 				if arr.len() == 0 {
@@ -168,9 +180,9 @@ impl Value {
 					add_ident(buf, pretty, ident_level + 1);
 					match field {
 						Field::Nb(nb) => write!(buf, "{nb}").unwrap(),
-						Field::Symbol(id) => buf.push_str(&res.symbols[*id as usize].name.val),
+						Field::Symbol(id) => display_symbol(buf, *id, res),
 					}
-					buf.push_str(": ");
+					buf.push_str(" = ");
 					value.display_item(buf, pretty, ident_level + 1, res, pool);
 					buf.push_str(", ");
 				}

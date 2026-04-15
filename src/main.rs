@@ -42,8 +42,8 @@ struct Args {
 }
 
 fn main() {
-	if let Err(e) = mainer() {
-		eprintln!("error: {}", e);
+	if let Err(err) = mainer() {
+		eprintln!("{err}");
 	}
 }
 fn mainer() -> Result<(), String> {
@@ -97,7 +97,6 @@ fn mainer() -> Result<(), String> {
 		let mut path_full = base_dir.clone();
 		path_full.extend(path.segments.iter().map(|v| &v.val));
 		path_full.set_extension("unim");
-		println!("requesting: {}", path_full.display());
 		let Ok(file) = read_to_string(&path_full) else {
 			let msg = format!(
 				"import error: can not load \"{path}\", can not find \"{}\"",

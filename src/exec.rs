@@ -190,7 +190,6 @@ pub enum ExecMode {
 pub fn exec(
 	res: ExecRes, mode: ExecMode, mut debug_print: Print, pretty_output: bool,
 ) -> Result<String, Error> {
-	println!("{res:#?}");
 	let init_fn = &res.fns[match mode {
 		ExecMode::Main(main) => main,
 		ExecMode::Const { init, .. } => init,
@@ -339,9 +338,7 @@ fn exec_pat_array(
 		}
 		let slice = Value::new_arr(id as u64);
 		let res = exec_pat(*pat, slice, res, exec)?;
-		if res == false {
-			exec.pool.free_value(slice);
-		}
+		exec.pool.free_value(slice);
 		Ok(res)
 	} else {
 		Ok(items.len() == arr.len())
@@ -422,7 +419,10 @@ fn exec_expr_array(
 						(stat.exprs[*expr as usize].span, src_path)
 					);
 				};
-				arr.extend(pool.arr_pool[other_id as usize].drain(..));
+				for value in &pool.arr_pool[other_id as usize] {
+					arr.push(pool.clone_value(*value));
+				}
+
 				pool.free_value(other);
 			}
 		}
@@ -567,7 +567,7 @@ fn exec_expr(expr: ExprId, res: &ExecRes, exec: &mut Execution) -> Result<Value,
 		ExprKind::Dbg(expr) => {
 			let expr = exec_expr(*expr, res, exec)?;
 			if let Print { pretty, output: Some(out) } = exec.debug_print {
-				if write!(out, "{}", expr.display(*pretty, res, exec.pool)).is_err() {
+				if write!(out, "{}\n", expr.display(*pretty, res, exec.pool)).is_err() {
 					return err!(
 						"execution error: failed to write to debug output",
 						(span, exec.src_path)

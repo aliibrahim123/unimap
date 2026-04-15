@@ -230,8 +230,9 @@ impl<'a> Scopes<'a> {
 	}
 	pub fn add_local(&mut self, name: CompactString) -> LocalId {
 		self.locals[self.local_top].insert(name, self.local_counter);
+		let id = self.local_counter;
 		self.local_counter += 1;
-		self.local_counter
+		id
 	}
 	pub fn pop_scope(&mut self) {
 		self.local_counter -= self.locals[self.local_top].len() as LocalId;
@@ -239,7 +240,7 @@ impl<'a> Scopes<'a> {
 		self.local_top -= 1;
 	}
 	pub fn resolve_local(&self, name: &Ident) -> Option<LocalId> {
-		for scope in &self.locals[..=self.local_top] {
+		for scope in self.locals[..=self.local_top].iter().rev() {
 			if let Some(&id) = scope.get(&name.val) {
 				return Some(id);
 			}
@@ -580,7 +581,7 @@ fn resolve_file(
 			}
 			scopes.add_local(arg.val.clone());
 		}
-		let mut res_ctx = ResolveCtx { stat: &mut body, exec: &exec, var_map, src_path, scopes };
+		let mut res_ctx = ResolveCtx { stat: &mut body, exec: &*exec, var_map, src_path, scopes };
 		body.root_expr = resolve_expr(&src.body, &mut res_ctx)?;
 		exec.fns[*id as usize].body = body;
 	}
@@ -588,7 +589,7 @@ fn resolve_file(
 		let src = &file_src.consts[ind];
 		let mut init = Stat::new();
 		let scopes = Scopes::new(&file.top_scope);
-		let mut res_ctx = ResolveCtx { stat: &mut init, exec: &exec, var_map, src_path, scopes };
+		let mut res_ctx = ResolveCtx { stat: &mut init, exec: &*exec, var_map, src_path, scopes };
 		init.root_expr = resolve_expr(&src.init, &mut res_ctx)?;
 		exec.consts[*id as usize].init = init;
 	}
