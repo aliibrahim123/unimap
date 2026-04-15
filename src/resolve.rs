@@ -17,9 +17,11 @@ use crate::{
 	utils::{Error, err},
 };
 
+/// a tree structure of the import tree, used to resolve imports
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PathNode {
 	Tree(PathTree),
+	/// the index of the file
 	Leaf(usize),
 }
 type PathTree = HashMap<CompactString, PathNode>;
@@ -27,6 +29,7 @@ impl PathNode {
 	pub fn insert(path: &Path, file: usize, root: &mut PathTree) {
 		let mut cur_branch = root;
 		for segment in &path.segments[..path.segments.len() - 1] {
+			// add branch if necessary
 			if !cur_branch.contains_key(&segment.val) {
 				cur_branch.insert(segment.val.clone(), PathNode::Tree(HashMap::new()));
 			}
@@ -78,18 +81,22 @@ impl PathNode {
 	}
 }
 
+/// loads a file at a given path, called with the importer
 pub type Loader<'a> = &'a dyn std::ops::Fn(&Path, &str) -> Result<LoadResult, Error>;
+/// result of `Loader`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadResult {
 	pub file: String,
-	pub path: String,
+	pub src_path: String,
 }
 
 fn load_loop(
 	path: &Path, root: &mut PathTree, files: &mut Vec<FileSrc>, importer: &str, loader: Loader,
 ) -> Result<(), Error> {
+	// reserve place
 	PathNode::insert(path, 0, root);
-	let LoadResult { file, path: src_path } = loader(path, importer)?;
+
+	let LoadResult { file, src_path } = loader(path, importer)?;
 	let file = parse_file(&file, &src_path)?;
 
 	for Import { path, .. } in &file.imports {
@@ -110,16 +117,20 @@ enum ItemType {
 	Const,
 	Fn,
 }
+/// item name -> (type, id)
 type ItemScope = HashMap<CompactString, (ItemType, u32)>;
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct File {
 	pub items: ItemScope,
+	/// local items + imports
 	pub top_scope: ItemScope,
 	pub fns: Vec<ItemId>,
 	pub consts: Vec<ItemId>,
 }
 
+/// enum id -> (variant name -> symbol id)
 type VarMap = HashMap<ItemId, HashMap<CompactString, ItemId>>;
+/// gather local items
 fn gather(src: &FileSrc, var_map: &mut VarMap, exec: &mut ExecRes) -> Result<File, Error> {
 	let ExecRes { file_names, consts, fns, symbols, .. } = exec;
 	let mut file = File::default();
@@ -141,6 +152,7 @@ fn gather(src: &FileSrc, var_map: &mut VarMap, exec: &mut ExecRes) -> Result<Fil
 		let id = symbols.len() as ItemId;
 		gather_item(name, ItemType::Symbol, id)?;
 		symbols.push(Symbol { name: name.clone(), kind: SymbolKind::Atom, src_path });
+
 		symbols[id as usize].kind = match kind {
 			SymbolSrcKind::Atom => SymbolKind::Atom,
 			SymbolSrcKind::Enum(variants) => {
@@ -154,21 +166,27 @@ fn gather(src: &FileSrc, var_map: &mut VarMap, exec: &mut ExecRes) -> Result<Fil
 						);
 					}
 					let var_id = symbols.len() as ItemId;
-					symbols.push(Symbol { name: var.clone(), kind: SymbolKind::Var(id), src_path });
+					symbols.push(Symbol {
+						name: var.clone(),
+						kind: SymbolKind::Var { enum_id: id },
+						src_path,
+					});
 					vars.insert(var_id);
 					map.insert(var.val.clone(), var_id);
 				}
 				var_map.insert(id, map);
-				SymbolKind::Enum(vars)
+				SymbolKind::Enum { vars }
 			}
 		};
 	}
+
 	for ConstSrc { name, .. } in &src.consts {
 		let id = consts.len() as ItemId;
 		gather_item(name, ItemType::Const, id)?;
 		consts.push(Const::new(name.clone(), src_path));
 		file.consts.push(id);
 	}
+
 	for FnSrc { name, args, .. } in &src.fns {
 		let id = fns.len() as ItemId;
 		gather_item(name, ItemType::Fn, id)?;
@@ -179,8 +197,9 @@ fn gather(src: &FileSrc, var_map: &mut VarMap, exec: &mut ExecRes) -> Result<Fil
 	file.top_scope = file.items.clone();
 	Ok(file)
 }
+/// resolve imports and add to the file top scope
 fn resolve_imports(
-	file_id: usize, src: &FileSrc, files: &mut Vec<File>, root: &PathTree,
+	file_id: usize, src: &FileSrc, files: &mut [File], root: &PathTree,
 ) -> Result<(), Error> {
 	for Import { path, items } in &src.imports {
 		let import_file = PathNode::get(path, root);
@@ -188,7 +207,7 @@ fn resolve_imports(
 			let import_file = &files[import_file];
 			let file = &files[file_id];
 
-			if file.items.contains_key(&item.val) || file.top_scope.contains_key(&item.val) {
+			if file.top_scope.contains_key(&item.val) {
 				return err!(
 					"resolve error: import \"{path}.{item}\" conflicts with another item",
 					(item.span, &src.path)
@@ -210,6 +229,7 @@ fn resolve_imports(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Scopes<'a> {
 	pub items: &'a ItemScope,
+	// reused within a file
 	pub locals: Vec<LocalScope>,
 	pub local_top: usize,
 	pub local_counter: LocalId,
@@ -276,11 +296,12 @@ fn expect_args(
 }
 
 fn resolve_field(field: &FieldKind, ctx: &ResolveCtx) -> Result<Field, Error> {
-	let ResolveCtx { scopes, src_path, .. } = ctx;
+	let ResolveCtx { scopes, src_path, exec, .. } = ctx;
 	let field = match field {
 		FieldKind::Ident(ident) => ident,
 		FieldKind::Nb(nb) => return Ok(Field::Nb(*nb)),
 	};
+
 	let (field_type, field_id) = scopes.resolve_item(field, src_path)?;
 	if field_type != ItemType::Symbol {
 		let kind = if field_type == ItemType::Const { "constant" } else { "function" };
@@ -289,7 +310,7 @@ fn resolve_field(field: &FieldKind, ctx: &ResolveCtx) -> Result<Field, Error> {
 			(field.span, src_path)
 		);
 	}
-	if ctx.exec.symbols[field_id as usize].kind != SymbolKind::Atom {
+	if exec.symbols[field_id as usize].kind != SymbolKind::Atom {
 		return err!(
 			"resolve error: symbol enum \"{field}\" can not be used as a field",
 			(field.span, src_path)
@@ -306,6 +327,7 @@ fn try_resolve_symbol(name: Option<&Ident>, scopes: &Scopes) -> Option<ItemId> {
 enum IdentResolve {
 	Local(LocalId),
 	Const(ItemId),
+	/// (id, is_enum)
 	Symbol(ItemId, bool),
 }
 fn resolve_ident(name: &Ident, ctx: &ResolveCtx, with_enum: bool) -> Result<IdentResolve, Error> {
@@ -320,7 +342,7 @@ fn resolve_ident(name: &Ident, ctx: &ResolveCtx, with_enum: bool) -> Result<Iden
 		if !with_enum && *kind != SymbolKind::Atom {
 			err!("resolve error: item \"{name}\" is a symbol enum", (name.span, src_path))
 		} else {
-			Ok(IdentResolve::Symbol(item_id, matches!(kind, SymbolKind::Enum(_))))
+			Ok(IdentResolve::Symbol(item_id, matches!(kind, SymbolKind::Enum { .. })))
 		}
 	} else if item_type == ItemType::Const {
 		Ok(IdentResolve::Const(item_id))
@@ -333,6 +355,7 @@ fn resolve_pat_enum(enumm: &Ident, var: &Ident, ctx: &mut ResolveCtx) -> Result<
 	if scopes.resolve_local(enumm).is_some() {
 		return err!("resolve error: \"{enumm}\" is not a symbol enum", (enumm.span, src_path));
 	}
+
 	let (_, enum_id) = scopes.resolve_item(enumm, src_path)?;
 	let Some(map) = var_map.get(&enum_id) else {
 		return err!("resolve error: \"{enumm}\" is not a symbol enum", (enumm.span, src_path));
@@ -370,6 +393,7 @@ fn resolve_pat_let(
 			(span, ctx.src_path)
 		);
 	}
+
 	let pat = resolve_pat(pat, allow_let, ctx)?;
 	if ctx.scopes.top().contains_key(&ident.val) {
 		return err!(
@@ -382,6 +406,7 @@ fn resolve_pat_let(
 }
 fn resolve_pat(pat: &PatSrc, allow_let: bool, ctx: &mut ResolveCtx) -> Result<PatId, Error> {
 	let kind = match &pat.kind {
+		// every Stat has a Any pattern as the first pat
 		PatSrcKind::Any => return Ok(0),
 		PatSrcKind::Ident(name) => match resolve_ident(name, ctx, true)? {
 			IdentResolve::Local(local) => PatKind::Local(local),
@@ -455,6 +480,7 @@ fn resolve_expr_field(
 	expr: &ExprSrc, field: &FieldKind, ctx: &mut ResolveCtx,
 ) -> Result<ExprKind, Error> {
 	let ResolveCtx { scopes, var_map, src_path, .. } = ctx;
+	// is enum.var
 	if let FieldKind::Ident(field) = field
 		&& let Some(name) = expr.as_ident()
 		&& let Some(id) = try_resolve_symbol(Some(name), scopes)
@@ -496,6 +522,7 @@ fn resolve_expr_map(
 		try_resolve_symbol(pat.as_ident(), &ctx.scopes).is_some()
 			|| matches!(pat.kind, PatSrcKind::Nb(_))
 	};
+	// jump table optimization
 	if arms_src.iter().all(|arm| is_simple(&arm.pat)) {
 		let mut table = HashMap::with_capacity(arms_src.len());
 		for MapArmSrc { map, pat } in arms_src {
@@ -507,26 +534,29 @@ fn resolve_expr_map(
 			table.insert(pat, expr);
 		}
 		Ok(ExprKind::JumpTable(expr, Box::new(table)))
-	} else {
+	}
+	// normal map
+	else {
 		let mut arms = Vec::with_capacity(arms_src.len());
 		for MapArmSrc { pat, map } in arms_src {
 			ctx.scopes.add_scope();
 			let pat = resolve_pat(pat, true, ctx)?;
-			let scope_slots = ctx.scopes.top().len() as LocalId;
-			if scope_slots == 0 {
+			let stack_slots = ctx.scopes.top().len() as LocalId;
+			if stack_slots == 0 {
 				ctx.scopes.pop_scope();
 			}
 			let expr = resolve_expr(map, ctx)?;
-			if scope_slots != 0 {
+			if stack_slots != 0 {
 				ctx.scopes.pop_scope();
 			}
-			arms.push(MapArm { pat, expr, stack_slots: scope_slots });
+			arms.push(MapArm { pat, expr, stack_slots });
 		}
 		Ok(ExprKind::Map(expr, arms.into_boxed_slice()))
 	}
 }
 fn resolve_expr(expr: &ExprSrc, ctx: &mut ResolveCtx) -> Result<ExprId, Error> {
 	let kind = match &expr.kind {
+		// every Stat has a Cur expr as the first expr
 		ExprSrcKind::Cur => return Ok(0),
 		ExprSrcKind::Call(fun, exprs) => resolve_expr_call(fun, exprs, ctx)?,
 		ExprSrcKind::Ident(name) => match resolve_ident(name, ctx, false)? {
@@ -568,10 +598,12 @@ fn resolve_file(
 	file: &mut File, file_src: &FileSrc, exec: &mut ExecRes, var_map: &mut VarMap,
 ) -> Result<(), Error> {
 	let src_path = &file_src.path;
+
 	for (ind, id) in file.fns.iter().enumerate() {
 		let src = &file_src.fns[ind];
 		let mut body = Stat::new();
 		let mut scopes = Scopes::new(&file.top_scope);
+
 		for arg in &src.args {
 			if scopes.top().contains_key(&arg.val) {
 				return err!(
@@ -581,6 +613,7 @@ fn resolve_file(
 			}
 			scopes.add_local(arg.val.clone());
 		}
+
 		let mut res_ctx = ResolveCtx { stat: &mut body, exec: &*exec, var_map, src_path, scopes };
 		body.root_expr = resolve_expr(&src.body, &mut res_ctx)?;
 		exec.fns[*id as usize].body = body;
@@ -589,6 +622,7 @@ fn resolve_file(
 		let src = &file_src.consts[ind];
 		let mut init = Stat::new();
 		let scopes = Scopes::new(&file.top_scope);
+
 		let mut res_ctx = ResolveCtx { stat: &mut init, exec: &*exec, var_map, src_path, scopes };
 		init.root_expr = resolve_expr(&src.init, &mut res_ctx)?;
 		exec.consts[*id as usize].init = init;
@@ -596,13 +630,47 @@ fn resolve_file(
 	Ok(())
 }
 
+fn resolve_exec_mode(files: &[File], files_src: &[FileSrc]) -> Result<ExecMode, Error> {
+	let root = files.last().unwrap();
+	let root_src = files_src.last().unwrap();
+	let find_fn =
+		|name: &str| root_src.fns.iter().enumerate().find(|(_, fun)| fun.name.val == name);
+
+	let exec_mode = if let Some((id, fun)) = find_fn("main") {
+		expect_args(0, fun.args.len() as u16, "main", fun.name.span, &root_src.path)?;
+		ExecMode::Main(root.fns[id])
+	} else if let Some((loop_id, loop_fn)) = find_fn("loop") {
+		expect_args(1, loop_fn.args.len() as u16, "loop", loop_fn.name.span, &root_src.path)?;
+
+		let Some((init_id, init_fn)) = find_fn("init") else {
+			return err!(
+				"resolve error: expected an \"init\" function with \"loop\"",
+				(Span::none(), &root_src.path)
+			);
+		};
+		expect_args(0, init_fn.args.len() as u16, "init", init_fn.name.span, &root_src.path)?;
+
+		ExecMode::Const { init: root.fns[init_id], looper: root.fns[loop_id] }
+	} else {
+		return err!(
+			"resolve error: can not execute the program, expected a \"main\" or \"loop\" function",
+			(Span::none(), &root_src.path)
+		);
+	};
+
+	Ok(exec_mode)
+}
+
+// load files, resolve items, validate and simplify the expression tree
 pub fn resolve(root_path: &Path, loader: Loader) -> Result<(ExecRes, ExecMode), Error> {
 	let mut exec = ExecRes::default();
 
+	// load
 	let mut path_tree = HashMap::new();
 	let mut files_src = Vec::new();
 	load_loop(root_path, &mut path_tree, &mut files_src, "", loader)?;
 
+	// gather
 	let mut files = Vec::new();
 	let var_map = &mut HashMap::new();
 	for file in &files_src {
@@ -612,34 +680,12 @@ pub fn resolve(root_path: &Path, loader: Loader) -> Result<(ExecRes, ExecMode), 
 		resolve_imports(file_id, src, &mut files, &path_tree)?;
 	}
 
+	// resolve
 	for (file_id, file) in files.iter_mut().enumerate() {
 		resolve_file(file, &files_src[file_id], &mut exec, var_map)?;
 	}
 
-	let root = files.last().unwrap();
-	let root_src = files_src.last().unwrap();
-	let find_fn = |name: &str| root_src.fns.iter().enumerate().find(|fun| fun.1.name.val == name);
+	let exec_mode = resolve_exec_mode(&files, &files_src)?;
 
-	let exec_mod = if let Some((id, fun)) = find_fn("main") {
-		expect_args(0, fun.args.len() as u16, "main", fun.name.span, &root_src.path)?;
-		ExecMode::Main(root.fns[id])
-	} else if let Some((loop_id, loop_fn)) = find_fn("loop") {
-		expect_args(1, loop_fn.args.len() as u16, "loop", loop_fn.name.span, &root_src.path)?;
-		let Some((init_id, init_fn)) = find_fn("init") else {
-			return err!(
-				"resolve error: expected an \"init\" function with \"loop\"",
-				(Span::none(), &root_src.path)
-			);
-		};
-
-		expect_args(0, init_fn.args.len() as u16, "init", init_fn.name.span, &root_src.path)?;
-		ExecMode::Const { init: root.fns[init_id], looper: root.fns[loop_id] }
-	} else {
-		return err!(
-			"resolve error: can not execute the program, expected a \"main\" or \"loop\" function",
-			(Span::none(), &root_src.path)
-		);
-	};
-
-	Ok((exec, exec_mod))
+	Ok((exec, exec_mode))
 }

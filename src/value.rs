@@ -2,7 +2,6 @@ use std::{
 	cell::{Cell, UnsafeCell},
 	fmt::Write,
 	ops::{Index, IndexMut},
-	usize,
 };
 
 use rustc_hash::FxHashMap;
@@ -147,7 +146,7 @@ impl Value {
 			let sym = &res.symbols[id as usize];
 			match sym.kind {
 				SymbolKind::Atom => buf.push_str(&sym.name.val),
-				SymbolKind::Var(enum_id) => {
+				SymbolKind::Var { enum_id } => {
 					buf.push_str(&res.symbols[enum_id as usize].name.val);
 					buf.push('.');
 					buf.push_str(&sym.name.val);
@@ -160,7 +159,7 @@ impl Value {
 			ValueDec::Sym(id) => display_symbol(buf, id, res),
 			ValueDec::Arr(id) => {
 				let arr = &pool.arr_pool[id as usize];
-				if arr.len() == 0 {
+				if arr.is_empty() {
 					buf.push_str("[]");
 					return;
 				}
@@ -182,7 +181,7 @@ impl Value {
 			}
 			ValueDec::Obj(id) => {
 				let obj = &pool.obj_pool[id as usize];
-				if obj.len() == 0 {
+				if obj.is_empty() {
 					buf.push_str("{}");
 					return;
 				}
@@ -425,7 +424,7 @@ impl ValuePool {
 				}
 
 				// safe since values can not contain themself
-				let arr = unsafe { &*self.arr_pool.get_cell(id as usize).get() };
+				let arr = unsafe { &*self.arr_pool.get_cell(id).get() };
 				for item in arr {
 					self.drop_value(*item);
 				}
@@ -438,13 +437,13 @@ impl ValuePool {
 				}
 
 				// safe since values can not contain themself
-				let obj = unsafe { &*self.obj_pool.get_cell(id as usize).get() };
+				let obj = unsafe { &*self.obj_pool.get_cell(id).get() };
 				for item in obj.values() {
 					self.drop_value(*item);
 				}
 				self.obj_pool.free(id);
 			}
-			_ => return,
+			_ => (),
 		}
 	}
 }

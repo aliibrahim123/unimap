@@ -1,3 +1,8 @@
+/// unimap virtual machine
+///
+/// not a naive implementation, but not a jit engine.
+///
+/// a simple but efficient flatterned expression tree interpreter with efficient object pool.
 use crate::{exec::exec, resolve::resolve};
 
 mod exec;

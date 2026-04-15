@@ -116,7 +116,7 @@ pub enum TokenKind<'a> {
 	Symbol,
 	Fn,
 	Import,
-	EOF,
+	Eof,
 }
 impl Display for TokenKind<'_> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -142,7 +142,7 @@ impl Display for TokenKind<'_> {
 			Self::Symbol => f.write_str("symbol"),
 			Self::Fn => f.write_str("fn"),
 			Self::Import => f.write_str("import"),
-			Self::EOF => f.write_str("EOF"),
+			Self::Eof => f.write_str("EOF"),
 		}
 	}
 }
@@ -283,6 +283,6 @@ pub fn tokenize<'a>(source: &'a str, src_path: &str) -> Result<Vec<Token<'a>>, E
 			}
 		};
 	}
-	tokens.push(Token { kind: Kind::EOF, span: Span::none() });
+	tokens.push(Token { kind: Kind::Eof, span: Span::none() });
 	Ok(tokens)
 }

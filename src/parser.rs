@@ -293,7 +293,7 @@ impl<'a> Cursor<'a> {
 	}
 	pub fn consume_any(&self) -> Option<&Token<'_>> {
 		let token = self.peek();
-		if token.kind == TokenKind::EOF {
+		if token.kind == TokenKind::Eof {
 			return None;
 		}
 		self.skip();
@@ -460,7 +460,7 @@ fn parse_expr_obj(cur: &Cursor) -> Result<Expr, Error> {
 		// `..`
 		if cur.try_eat(Dot) {
 			cur.consume(Dot)?;
-			return Ok(ObjectItem::Spread(parse_expr(cur)?));
+			Ok(ObjectItem::Spread(parse_expr(cur)?))
 		}
 		// [index] = value
 		else if cur.try_eat(BracketOpen) {
@@ -492,7 +492,7 @@ fn parse_expr_primary(cur: &Cursor) -> Result<Expr, Error> {
 	// local, constant, symbol or call
 	else if let Some(ident) = cur.try_consume_ident() {
 		if cur.test(ParenOpen) {
-			let args = parse_delim_list(cur, ParenOpen, ParenClose, Comma, |cur| parse_expr(cur))?;
+			let args = parse_delim_list(cur, ParenOpen, ParenClose, Comma, parse_expr)?;
 			Ok(Expr { span: cur.span_from(ident.span), kind: ExprKind::Call(ident, args) })
 		} else {
 			Ok(ident.into_expr())
@@ -542,7 +542,7 @@ fn parse_expr_postfix(cur: &Cursor) -> Result<Expr, Error> {
 				let map = parse_expr(cur)?;
 				Ok(MapArm { pat, map })
 			})?;
-			if arms.len() == 0 {
+			if arms.is_empty() {
 				return err!(
 					"parse error: map expression must have at least 1 arm",
 					(cur.span_from(brace_start), cur.src_path)
@@ -614,8 +614,7 @@ fn parse_fn(cur: &Cursor) -> Result<Fn, Error> {
 pub fn parse_file(source: &str, src_path: &str) -> Result<File, Error> {
 	let tokens = tokenize(source, src_path)?;
 	let cur = Cursor::new(&tokens, src_path);
-	let mut file = File::default();
-	file.path = src_path.to_string();
+	let mut file = File { path: src_path.to_string(), ..File::default() };
 
 	while let Some(cur_token) = cur.consume_any() {
 		match cur_token.kind {

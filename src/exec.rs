@@ -15,8 +15,8 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymbolKind {
 	Atom,
-	Enum(HashSet<ItemId>),
-	Var(ItemId),
+	Enum { vars: HashSet<ItemId> },
+	Var { enum_id: ItemId },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Symbol {
@@ -115,6 +115,7 @@ pub enum ExprKind {
 	Index(ExprId, ExprId),
 	Object(Box<[ObjectItem]>),
 	Array(Box<[ArrayItem]>),
+	#[allow(clippy::box_collection)]
 	JumpTable(ExprId, Box<HashMap<Field, ExprId>>),
 	Map(ExprId, Box<[MapArm]>),
 	Pipe(Box<[ExprId]>),
@@ -142,6 +143,7 @@ pub enum PatKind {
 	Array(Box<[PatId]>, Option<PatId>),
 	Or(Box<[PatId]>),
 }
+/// statement
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stat {
 	pub exprs: Vec<Expr>,
@@ -161,6 +163,7 @@ impl Stat {
 	}
 }
 
+/// print options
 pub struct Print<'a> {
 	pub output: Option<&'a mut dyn std::io::Write>,
 	pub pretty: bool,
@@ -170,12 +173,14 @@ impl Debug for Print<'_> {
 		f.debug_struct("DebugPrint").field("pretty", &self.pretty).finish()
 	}
 }
+/// the heart of the interpreter
 #[derive(Debug)]
 pub struct Execution<'a, 'b, 'c> {
 	stat: &'a Stat,
 	pool: &'a mut ValuePool,
 	stack: &'a mut Vec<Value>,
 	frame_start: usize,
+	/// intermediate value of pipes
 	cur_value: Option<Value>,
 	src_path: &'a str,
 	debug_print: &'c mut Print<'b>,
@@ -194,6 +199,7 @@ pub fn exec(
 		ExecMode::Main(main) => main,
 		ExecMode::Const { init, .. } => init,
 	} as usize];
+
 	let mut exec = Execution {
 		stat: &init_fn.body,
 		pool: &mut ValuePool::default(),
@@ -203,6 +209,7 @@ pub fn exec(
 		src_path: &res.file_names[init_fn.src_path],
 		debug_print: &mut debug_print,
 	};
+
 	let final_value = match mode {
 		ExecMode::Main(_) => exec_expr(init_fn.body.root_expr, &res, &mut exec)?,
 		ExecMode::Const { looper, .. } => {
@@ -244,7 +251,7 @@ pub fn exec(
 		}
 	};
 
-	Ok(final_value.display(pretty_output, &res, &exec.pool))
+	Ok(final_value.display(pretty_output, &res, exec.pool))
 }
 
 fn exec_index(
@@ -256,16 +263,18 @@ fn exec_index(
 			Some(value) => pool.clone_value(*value),
 			None => return err!("execution error: index {nb} is out of bounds", (span, src_path)),
 		},
+
 		(ValueDec::Obj(id), field) => match pool.obj_pool[id as usize].get(&field) {
 			Some(value) => pool.clone_value(*value),
 			None => {
-				let field = field.display(&res);
+				let field = field.display(res);
 				return err!(
 					"execution error: object does not have field \"{field}\"",
 					(span, src_path)
 				);
 			}
 		},
+
 		(_, Field::Nb(_)) => {
 			return err!("execution error: indexing a non array / object value", (span, src_path));
 		}
@@ -276,6 +285,7 @@ fn exec_index(
 			);
 		}
 	};
+
 	pool.drop_value(value);
 	Ok(result)
 }
@@ -293,6 +303,7 @@ fn resolve_const(id: ItemId, res: &ExecRes, exec: &mut Execution) -> Result<Valu
 	let Execution { pool, stack, .. } = exec;
 	let Const { name, init, status, src_path } = &res.consts[id as usize];
 	let src_path = &res.file_names[*src_path];
+
 	match status.get() {
 		ConstStatus::Computed(value) => Ok(value),
 		ConstStatus::Uninit => {
@@ -320,35 +331,38 @@ fn exec_pat_array(
 	items: &[PatId], rest: &Option<PatId>, value: Value, res: &ExecRes, exec: &mut Execution,
 ) -> Result<bool, Error> {
 	let Some(id) = value.as_arr() else { return Ok(false) };
-	let arr = unsafe { &*exec.pool.arr_pool.get_cell(id as usize).get() };
-	if arr.len() < items.len() {
+	let arr = exec.pool.arr_pool.get_cell(id as usize).get();
+	if unsafe { (*arr).len() } < items.len() {
 		return Ok(false);
 	}
+
 	for (index, item) in items.iter().enumerate() {
-		if !exec_pat(*item, arr[index], res, exec)? {
+		if !exec_pat(*item, unsafe { (&*arr)[index] }, res, exec)? {
 			return Ok(false);
 		}
 	}
+
 	if let Some(pat) = rest {
 		let (slice, id) = exec.pool.arr_pool.alloc();
 		let slice = unsafe { &mut *slice.get() };
-		slice.extend(&arr[items.len()..]);
+		slice.extend(unsafe { &(&*arr)[items.len()..] });
 		for value in slice {
 			exec.pool.clone_value(*value);
 		}
+
 		let slice = Value::new_arr(id as u64);
 		let res = exec_pat(*pat, slice, res, exec)?;
 		exec.pool.drop_value(slice);
 		Ok(res)
 	} else {
-		Ok(items.len() == arr.len())
+		Ok(items.len() == unsafe { (*arr).len() })
 	}
 }
 fn exec_pat_object(
 	fields: &[FieldPat], value: Value, res: &ExecRes, exec: &mut Execution,
 ) -> Result<bool, Error> {
 	let Some(id) = value.as_obj() else { return Ok(false) };
-	let obj = unsafe { &*exec.pool.obj_pool.get_cell(id as usize).get() };
+	let obj = exec.pool.obj_pool.get_cell(id as usize).get();
 
 	for field in fields {
 		let (field, pat) = match field {
@@ -359,7 +373,8 @@ fn exec_pat_object(
 				(field, *pat)
 			}
 		};
-		let Some(value) = obj.get(&field) else { return Ok(false) };
+
+		let Some(value) = (unsafe { (*obj).get(&field) }) else { return Ok(false) };
 		if !exec_pat(pat, *value, res, exec)? {
 			return Ok(false);
 		}
@@ -375,8 +390,8 @@ fn exec_pat(pat: PatId, value: Value, res: &ExecRes, exec: &mut Execution) -> Re
 		PatKind::Nb(nb) => value.as_nb() == Some(*nb),
 		PatKind::Symbol { id, is_enum: false } => value.as_sym() == Some(*id),
 		PatKind::Symbol { id, is_enum: true } => {
-			let SymbolKind::Enum(vars) = &res.symbols[*id as usize].kind else { unreachable!() };
-			value.as_sym().map_or(false, |sym| vars.contains(&sym))
+			let SymbolKind::Enum { vars } = &res.symbols[*id as usize].kind else { unreachable!() };
+			value.as_sym().is_some_and(|sym| vars.contains(&sym))
 		}
 		PatKind::Const(id) => Value::eq(resolve_const(*id, res, exec)?, value, exec.pool),
 		PatKind::Local(id) => Value::eq(stack[*frame_start + *id as usize], value, pool),
@@ -419,6 +434,7 @@ fn exec_expr_array(
 						(stat.exprs[*expr as usize].span, src_path)
 					);
 				};
+
 				for value in &pool.arr_pool[other_id as usize] {
 					unsafe { (*arr).push(pool.clone_value(*value)) };
 				}
@@ -459,6 +475,7 @@ fn exec_expr_object(
 						(stat.exprs[*expr as usize].span, src_path)
 					);
 				};
+
 				let other_obj = unsafe { &*pool.obj_pool.get_cell(other_id as usize).get() };
 				for (field, value) in other_obj {
 					let value = pool.clone_value(*value);
@@ -481,6 +498,7 @@ fn exec_expr_call(
 		let arg = exec_expr(*arg, res, exec)?;
 		exec.stack.push(arg);
 	}
+
 	let mut exec = Execution {
 		stat: body,
 		cur_value: None,
@@ -490,6 +508,7 @@ fn exec_expr_call(
 		stack: exec.stack,
 		debug_print: exec.debug_print,
 	};
+
 	let ret = exec_expr(body.root_expr, res, &mut exec)?;
 	for value in exec.stack.drain(frame_start..) {
 		exec.pool.drop_value(value);
@@ -505,10 +524,13 @@ fn exec_expr_map(
 		if arm.stack_slots != 0 {
 			exec.stack.resize(stack_top + arm.stack_slots as usize, Value::DUMMY);
 		}
+
 		let res = exec_pat(arm.pat, value, res, exec)?.then(|| exec_expr(arm.expr, res, exec));
+
 		for value in exec.stack.drain(stack_top..) {
 			exec.pool.drop_value(value);
 		}
+
 		if let Some(res) = res {
 			exec.pool.drop_value(value);
 			return res;
@@ -563,20 +585,22 @@ fn exec_expr(expr: ExprId, res: &ExecRes, exec: &mut Execution) -> Result<Value,
 				}
 				exec.cur_value = Some(value);
 			}
+
 			let value = exec.cur_value.unwrap();
 			exec.cur_value = prev_value;
 			Ok(value)
 		}
 		ExprKind::Dbg(expr) => {
 			let expr = exec_expr(*expr, res, exec)?;
-			if let Print { pretty, output: Some(out) } = exec.debug_print {
-				if write!(out, "{}\n", expr.display(*pretty, res, exec.pool)).is_err() {
-					return err!(
-						"execution error: failed to write to debug output",
-						(span, exec.src_path)
-					);
-				};
-			}
+			if let Print { pretty, output: Some(out) } = exec.debug_print
+				&& writeln!(out, "{}", expr.display(*pretty, res, exec.pool)).is_err()
+			{
+				return err!(
+					"execution error: failed to write to debug output",
+					(span, exec.src_path)
+				);
+			};
+
 			Ok(expr)
 		}
 	}

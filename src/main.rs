@@ -125,7 +125,7 @@ fn mainer() -> Result<(), String> {
 			);
 			return Err(Error::new(msg, path.span, importer));
 		};
-		Ok(LoadResult { file, path: path_full.to_str().unwrap().to_string() })
+		Ok(LoadResult { file, src_path: path_full.to_str().unwrap().to_string() })
 	};
 
 	let value = run(&root, &loader, debug_print, !no_pretty).map_err(|err| err.to_string())?;
