@@ -343,6 +343,9 @@ fn exec_pat_array(
 	}
 
 	if let Some(pat) = rest {
+		if *pat == 0 {
+			return Ok(true);
+		}
 		let (slice, id) = exec.pool.arr_pool.alloc();
 		let slice = unsafe { &mut *slice.get() };
 		slice.extend(unsafe { &(&*arr)[items.len()..] });
