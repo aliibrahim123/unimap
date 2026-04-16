@@ -8,7 +8,7 @@ use crate::utils::{Error, StrExt, err};
 ///
 /// `start` and `end` are (line, column)
 ///
-/// char counted starts from 1, `\n` is line, `\t` counts as 4, end is inclusive
+/// char counted starts from 1, `\n` is line, end is inclusive
 // has the possibility to panic if the file is big, but will not increase the size of all structs just to fix it, please keep your files small.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
@@ -217,7 +217,7 @@ pub fn tokenize<'a>(source: &'a str, src_path: &str) -> Result<Vec<Token<'a>>, E
 
 		match cur_char {
 			' ' | '\t' | '\r' => {
-				cur_pos.1 += if cur_char == '\t' { 4 } else { 1 };
+				cur_pos.1 += 1;
 				ind += 1
 			}
 			'\n' => {
