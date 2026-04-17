@@ -127,7 +127,7 @@ impl Display for TokenKind<'_> {
 			Self::Eq => f.write_str("="),
 			Self::Colon => f.write_str(":"),
 			Self::Comma => f.write_str(","),
-			Self::Dash => f.write_str("-"),
+			Self::Dash => f.write_str("_"),
 			Self::Or => f.write_str("|"),
 			Self::Arrow => f.write_str("=>"),
 			Self::Pipe => f.write_str("|>"),
