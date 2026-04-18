@@ -337,7 +337,7 @@ fn exec_pat_array(
 	}
 
 	for (index, item) in items.iter().enumerate() {
-		if !exec_pat(*item, unsafe { (&*arr)[index] }, res, exec)? {
+		if !(*item == 0 || exec_pat(*item, unsafe { (&*arr)[index] }, res, exec)?) {
 			return Ok(false);
 		}
 	}
@@ -399,7 +399,7 @@ fn exec_pat(pat: PatId, value: Value, res: &ExecRes, exec: &mut Execution) -> Re
 		PatKind::Const(id) => Value::eq(resolve_const(*id, res, exec)?, value, exec.pool),
 		PatKind::Local(id) => Value::eq(stack[*frame_start + *id as usize], value, pool),
 		PatKind::Let(id, pat) => {
-			if !exec_pat(*pat, value, res, exec)? {
+			if !(*pat == 0 || exec_pat(*pat, value, res, exec)?) {
 				return Ok(false);
 			}
 			exec.stack[exec.frame_start + *id as usize] = exec.pool.clone_value(value);
