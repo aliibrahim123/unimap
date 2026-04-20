@@ -28,6 +28,8 @@ fn main () => filter_zero([1, 0, 0, 2, 0, 3]) |> map_one(_); // => [2, 2, 3]
 
 this document serve as a reference for the language, discribing its syntax and semantics, and detailing its execution model.
 
+this languages is not designed for production, it is not grandate to be updated or fixed, nor being backward compatible, use it for fun, not for production.
+
 # general grammar
 this document use the [gramex meta language](https://docs.rs/gramex/latest/gramex/docs/gram_ref/index.html) as a grammar notation, and expects the source to be a valid UTF-8 file.
 
@@ -91,7 +93,7 @@ fn equal_a (v) => v: { a => 1, _ => 0 };
 let test1 = equal_a(a); // => 1
 let test2 = equal_a(b); // => 0
 ```
-### symbol declaration
+### `symbol` declaration
 ```gramex
 let symbol_decl = "symbol" (ident ("{" list<ident, ","> "}")?)+ ";";
 ```
@@ -205,8 +207,65 @@ let test4 = equal(arr, [1, 2, c, 1]); // => 0
 ```
 
 # module system
+unimap has a very simple module system where each file is a distinct module having its own scope and path.
 
+each module consists of a list of top level declarations that defines a number of local items.
 
+these declarations are `import`, `fn`, constant and `symbol` declerations.
+
+these declarations can be ordered in any way, and can reference other items declared / imported after them.
+
+the declared items are local to the module, however they can be imported into other modules with the `import` statement.
+
+each item must have a locally unique identifier, moreover, multiple items in different modules can be decleared with the same name totally fine until you want to import them.
+
+```unimap
+symbol a, b, c;
+let arr = [a, b, f(), d];
+import other { d };
+fn f () => c;
+```
+
+## `import` declaration
+```gramex
+let import_decl = "import" path "{" list<ident, ","> "}" ";";
+let path = list<ident, ".">;
+```
+`import` declerations bring number of items declared in another module into the current module scope.
+
+`import` declerations consists of a path to the source module and a comma separated list of item identifiers to import.
+
+the imported items must not conflict with locally declared items, or other imported items, and like local items can be used before the `import` declaration.
+
+```
+// file a.unim
+symbol a, b, c;
+
+// file b.unim
+let arr = [a, b, c];
+import a { a, b, c };
+```
+
+the path is a dot separated list of identifiers that refers to a specific module, they are relative to the base directory, and are converted to fs path in form of `some.file` -> `{base_dir}/some/file.unim`.
+
+a path part can not resolve to directry and a file in the same time
+```unimap
+// is base resolve to base.unim or to base/
+import base { a, b }; 
+import base.sub { c, d }; 
+```
+
+modules can import from each other in any way, a cyclic graph is possible not necessary to be in a tree like order.
+```unim
+// file a
+symbol a, b, c;
+import b { d };
+fn f () => d;
+
+// file b
+let d = [a, b, c];
+import a { a, b, c };
+```
 
 # expressions
 
