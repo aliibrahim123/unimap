@@ -266,7 +266,10 @@ pub fn tokenize<'a>(source: &'a str, src_path: &str) -> Result<Vec<Token<'a>>, E
 					"fn" => Kind::Fn,
 					"symbol" => Kind::Symbol,
 					"import" => Kind::Import,
-					_ if ident.chars().all(|c| c.is_ascii_digit()) => {
+					_ if ident.starts_with(|c| matches!(c, '1'..='9'))
+						&& ident.chars().all(|c| c.is_ascii_digit())
+						|| ident == "0" =>
+					{
 						let Ok(nb) = ident.parse::<u64>() else {
 							return err!(
 								"parse error: number ({ident}) is so large.",
