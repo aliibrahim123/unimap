@@ -140,7 +140,7 @@ let nb = "0" | "1".."9" ("0".."9")*;
 ```
 numbers are special kind of symbols that have special properties.
 
-numbers are arbitary sequences of decimal digits, starting with a non zero digit or being just `0`. 
+numbers are arbitary sequences of decimal digits, starting with a non zero digit or being just `0`.
 
 they are defined intrinsicly by the language, globally unique, and are used to index arrays, other than these specific properties, numbers behave exactly like regular symbols.
 
@@ -156,7 +156,7 @@ let test2 = is_1(01); // => 0
 ## records
 records are heterogeneous key value pair data structures that have symbols as fields, and any value as fields values (even other records).
 
-they are defined by an optional list of `field = value` pairs separated by commas, enclosed inside curly braces.
+they are defined by a list of `field = value` pairs separated by commas, enclosed inside curly braces.
 
 they can be created, accessed via `rec.field` or `rec[index]`, matched or matched against, and passed to and from functions. like, any value in unimap, they are strictly immutable.
 
@@ -182,7 +182,7 @@ let test3 = equal(rec, { a = 1, b = 2, 3 = c, 1 = a }); // => 0
 ## arrays
 arrays are heterogeneous sequences of values, zero indexed by numbers.
 
-they are defined by an optional comma separated list of values enclosed inside square brackets.
+they are defined by a comma separated list of values enclosed inside square brackets.
 
 like records, they can be created, accessed by `arr.nb` or `arr[index]`, matched and are fully immutable.
 
@@ -248,7 +248,7 @@ import a { a, b, c };
 
 the path is a dot separated list of identifiers that refers to a specific module, they are relative to the base directory, and are converted to fs path in form of `some.file` -> `{base_dir}/some/file.unim`.
 
-a path part can not resolve to directry and a file in the same time
+a path part can not resolve to directory and a file in the same time
 ```unimap
 // is base resolve to base.unim or to base/
 import base { a, b }; 
@@ -268,6 +268,204 @@ import a { a, b, c };
 ```
 
 # expressions
+unimap is an expression based language, it is build around expressions, operations and literals that evaluate to values.
+
+expressions are devided according to associativity and heirarchy into primary, postfix and flow.
+
+## primary expressions
+```gramex
+let primary_expr = "_" | ident | nb | call_expr | "(" expr ")" | arr_expr | rec_expr | dbg_expr;
+```
+primary expressions are the top level expressions, they create / resolve to values which the rest of the expressions operate on.
+
+### intermediate expression
+the intermediate expression (`_`) evaluate to the value piped from the previous expression in the pipe chain.
+
+it is forbidden to use `_` outside a pipe chain.
+
+```unimap
+symbol a, b, c, nested;
+fn main () => 1 |> [_, 2, 3] |> { a = _[0], b = _[1], c = { nested = _[2] } }; // => { a = 1, b = 2, c = { nested = 3 } }
+```
+
+### grouped expression
+the grouped expression is an expression enclosed inside parentheses, it evaluates to the value of the expression inside.
+
+```unimap
+let one = (1 |> [_, 2, 3]).0; // => 1
+```
+
+### identifier expression
+the identifier expression is an identifier that evaluates to the value of the symbol / constant / local resolved by the identifier in the current scope.
+
+```unimap
+symbol a;
+let b = 1;
+fn f (c) => [a, b, c];
+```
+
+### call expression
+```gramex
+let call_expr = ident "(" list<expr, ",">? ")";
+```
+the call expression is an expression that calls a function by its identifier with a list of arguments, evaluating to its result.
+
+the argument list is a comma separated list of expressions enclosed inside parentheses.
+
+```unimap
+fn f1 (a, b, c) => [a, b, c];
+fn f2 () => 3;
+let result = f1(1, 2, f2()); // => [1, 2, 3]
+```
+
+### debug expression
+```gramex
+let dbg_expr = "dbg" "(" expr ","? ")";
+```
+the debug expression is like a call expression to a `dbg` function, it prints the value of the passed argument then returns it.
+
+if a local item is named `dbg`, a call to `dbg` will become a call to the local item not a debug expression.
+
+```unimap
+let value = [1, 2, 3] |> dbg(_) |> some_fn(_);
+```
+
+## literals
+literals are primary expressions that creates values.
+
+### number literal
+the number literal is a number literal that evaluates to a number symbol.
+
+```unimap
+let nb = 1;
+```
+### array literal
+```gramex
+let arr_expr = "[" list<expr | ".." expr, ",">? "]";
+```
+the array literal is an expression that creates an array value from a list of elements.
+
+the item list is a comma separated list enclosed inside brackets, consisting of:
+- expressions with their values appended to the array.
+- spread operator `..` followed by an expression that evaluates to an array whose items are appended to the array.
+
+```unimap
+let arr1 = [1, 2, 3];
+let arr2 = [0, ..arr1, 4, ..[5, 6]]; // => [0, 1, 2, 3, 4, 5, 6]
+```
+
+### record literal
+```gramex
+let field = ident | symbol;
+let rec_expr = "{" list<rec_item, ",">? "}";
+let rec_item = field "=" expr | "[" expr "]" "=" expr | ".." expr;
+```
+the record literal is an expression that creates a record value from a list of record items.
+
+the record item list is a comma separated list enclosed inside curly braces, consisting of:
+- a field item: a field symbol and its value expression separated by `=`.
+- indexed item: an expression enclosed inside square brackets evaluating to the field symbol, then a `=` and the field value expression.
+- spread operator `..` followed by an expression that evaluates to a record whose fields are added to the record.
+
+if two items evaluate to the same field symbol, the last one wins.
+
+```unimap
+symbol a, b, c, e { v1, v2 };
+let rec1 = { a = 1, b = 2, 3 = c };
+let rec2 = { a = 2, ..rec1, [e.v1] = e.v2, } // => { a = 1, b = 2, 3 = c, e.v1 = e.v2 };
+```
+
+## postfix expressions
+```gramex
+let postfix_expr = primary_expr postfix_op*;
+let postfix_op = field_expr | index_expr | map_expr;
+```
+postfix expressions are primary expressions followed by a chain of postfix operators that operate on the previous expression value.
+
+### field access operator
+```gramex
+let field_expr = "." field;
+```
+the field access operator evaluates to the value of a field of a record or an item of an array.
+
+it is written as a `.` followed by a field symbol, if the record / array doesnt have the field / item, an error is raised.
+
+```unimap
+symbol a, b, c;
+let rec = { a = 1, b = 2, 3 = c };
+let arr = [a, b, 3];
+
+let field_a = rec.a; // => 1
+let item_2 = arr.1; // => 2
+```
+
+### index operator
+```gramex
+let index_expr = "[" expr "]";
+```
+the index operator index into an array or a record and evaluates to the indexed item / field value.
+
+it is written as an expression enclosed inside square brackets, if the array / record doesnt have the index value, an error is raised.
+
+```unimap
+symbol a, b, c, e { v1, v2 };
+let rec = { a = 1, b = 2, 3 = c };
+let arr = [a, b, 3];
+let rec2 = { e.v1 = [e.v2] };
+
+let field_a = rec[a]; // => 1
+let item_2 = arr[1]; // => 2
+let nested = rec2[e.v1].0; // => e.v2
+```
+
+## map operator
+```gramex
+let map_expr = ":" "{" list<pat "=>" expr, ","> "}";
+```
+the map operator is the heart of the language.
+
+it is a postfix operator that takes the previous expression value, match it against a set of patterns, then map the value using the first match map expression.
+
+if the patterns are not exhaustive, an error is raised.
+
+it is a `:` followed by a comma separated list of match arms enclosed inside curly braces, each arm has a pattern and a map expression separated by `=>`.
+
+the map expression is the only control flow inside the language.
+
+```unimap
+symbol a, b, c;
+fn match (v) => v: {
+	a => 1,
+	b => 2,
+	_ => 3,
+};
+
+let result1 = match(a); // => 1
+let result2 = match(c); // => 3
+```
+
+## flow expression
+```
+let expr = postfix_expr | pipe_expr;
+```
+flow expressions are the entry level of the expression heierarchy, they may be a regular primary expression, postfix expression or a pipe expression.
+
+### pipe expression
+```gramex
+let pipe_expr = list<expr, "|>">;
+```
+the pipe expression is a chain of expressions separated by the pipe operator `|>` that evaluates in a chain.
+
+each expression value is pipe to the next expression in the chain till the end expression where its value is the evaluated value of the whole chain.
+
+the pipe expression with the map expression are the only flow inside the language.
+
+```unimap
+let result = 1   // => 3
+	|> [_, 2, 3]
+	|> dgb(_)
+	|> _[2]
+```
 
 # patterns
 

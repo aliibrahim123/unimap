@@ -498,6 +498,12 @@ fn parse_expr_primary(cur: &Cursor) -> Result<Expr, Error> {
 			Ok(ident.into_expr())
 		}
 	}
+	// (expr)
+	else if cur.try_eat(ParenOpen) {
+		let expr = parse_expr(cur)?;
+		cur.consume(ParenClose)?;
+		Ok(expr)
+	}
 	// object
 	else if cur.test(BraceOpen) {
 		parse_expr_obj(cur)

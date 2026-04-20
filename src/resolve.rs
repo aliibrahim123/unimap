@@ -453,12 +453,13 @@ fn resolve_expr_call(
 	if scopes.resolve_local(fun).is_some() {
 		return err!("resolve error: \"{fun}\" is not a function", (fun.span, src_path));
 	}
-	if fun.val == "dbg" {
+	let resolve_res = scopes.resolve_item(fun, src_path);
+	if fun.val == "dbg" && resolve_res.is_err() {
 		expect_args(1, exprs.len() as u16, "dbg", fun.span, src_path)?;
 		return Ok(ExprKind::Dbg(resolve_expr(&exprs[0], ctx)?));
 	}
 
-	let (fun_type, fun_id) = scopes.resolve_item(fun, src_path)?;
+	let (fun_type, fun_id) = resolve_res?;
 	if fun_type != ItemType::Fn {
 		return err!("resolve error: \"{fun}\" is not a function", (fun.span, src_path));
 	}
