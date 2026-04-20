@@ -83,7 +83,7 @@ pub enum PatKind {
 	Ident(Ident),
 	Nb(u64),
 	/// `ident '.' ident`
-	Enum(Ident, Box<Ident>),
+	Var(Ident, Box<Ident>),
 	/// `"let" ident ('=' pat)?`
 	Let(Ident, Box<Pat>),
 	/// `'{' list<field_pat, ','>? '}'`
@@ -397,7 +397,7 @@ fn parse_pat_primary(cur: &Cursor) -> Result<Pat, Error> {
 		if cur.try_eat(Dot) {
 			let var = cur.consume_ident()?;
 			let span = ident.span.join(var.span);
-			Ok(Pat { span, kind: PatKind::Enum(ident, Box::new(var)) })
+			Ok(Pat { span, kind: PatKind::Var(ident, Box::new(var)) })
 		} else {
 			Ok(Pat { span: ident.span, kind: PatKind::Ident(ident) })
 		}

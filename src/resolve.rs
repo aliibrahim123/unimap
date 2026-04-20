@@ -414,7 +414,7 @@ fn resolve_pat(pat: &PatSrc, allow_let: bool, ctx: &mut ResolveCtx) -> Result<Pa
 			IdentResolve::Const(id) => PatKind::Const(id),
 		},
 		PatSrcKind::Nb(nb) => PatKind::Nb(*nb),
-		PatSrcKind::Enum(enumm, var) => resolve_pat_enum(enumm, var, ctx)?,
+		PatSrcKind::Var(enumm, var) => resolve_pat_enum(enumm, var, ctx)?,
 		PatSrcKind::Let(ident, pat) => resolve_pat_let(ident, pat, allow_let, pat.span, ctx)?,
 		PatSrcKind::Object(items_src) => resolve_pat_obj(items_src, allow_let, ctx)?,
 		PatSrcKind::Array(items_src) => {

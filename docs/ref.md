@@ -390,13 +390,16 @@ the field access operator evaluates to the value of a field of a record or an it
 
 it is written as a `.` followed by a field symbol, if the record / array doesnt have the field / item, an error is raised.
 
+the field access operator is also used in resolving symbol variants.
+
 ```unimap
-symbol a, b, c;
+symbol a, b, c, e { v1, v2 };
 let rec = { a = 1, b = 2, 3 = c };
 let arr = [a, b, 3];
 
 let field_a = rec.a; // => 1
 let item_2 = arr.1; // => 2
+let variant = e.v1;
 ```
 
 ### index operator
@@ -463,10 +466,157 @@ the pipe expression with the map expression are the only flow inside the languag
 ```unimap
 let result = 1   // => 3
 	|> [_, 2, 3]
-	|> dgb(_)
+	|> dbg(_)
 	|> _[2]
 ```
 
 # patterns
+```gramex
+let pat = `_` | ident | nb | ident "." ident | let_pat | rec_pat | arr_pat | or_pat;
+```
+pattern matching is the identity of the language.
+
+patterns are used to match the equality and the structure of values, they are also used in destructing the values.
+
+### wildcard pattern
+the wildcard pattern `_` matches any value.
+
+```unimap
+let result = 0: { _ => 1 } // => 1
+```
+
+### identifier pattern
+the identifier pattern is an identifier that matches by equality to the value of the symbol / constant / local resolved by the identifier in the current scope.
+
+```unimap
+symbol a, e { v1, v2 };
+let b = 1;
+fn match (v, c) => v: {
+	a => 1,
+	b => 2,
+	c => 3,
+	e => 4,
+};
+
+let test1 = match(a, 2); // => 1
+let test2 = match(1, 2); // => 2
+let test3 = match(2, 2); // => 3
+let test4 = match(e.v1, 2); // => 4
+```
+
+### number pattern
+the number pattern is a number that matches itself.
+
+```unimap
+fn is_1 (v) => v: { 1 => 1, _ => 0 };
+let test1 = is_1(1); // => 1
+let test2 = is_1(0); // => 0
+```
+
+### variant pattern
+the variant pattern is a pattern that matches by a symbol variant.
+
+it is written as the enum identifier followed by the variant identifier separated by a `.`.
+
+```unimap
+symbol e { v1, v2 };
+fn is_v1 (v) => v: { e.v1 => 1, _ => 0 };
+let test1 = is_v1(e.v1); // => 1
+let test2 = is_v1(e.v2); // => 0
+```
+
+## let pattern
+```gramex
+let let_pat = "let" ident (":" pat)?;
+```
+the let pattern matches the value by a pattern and assign it to a local if it matches.
+
+the let pattern is written as `let` followed by the local identifier and an optional pattern preceeded by a `:`.
+
+if no pattern is given, the let pattern always matches.
+
+```unimap
+fn map (v, from, to) => v: {
+	from => to,
+	let x => x,
+};
+
+let test1 = map(1, 1, 0); // => 0
+let test2 = map(2, 1, 0); // => 2
+```
+
+## array pattern
+```gramex
+let arr_pat = "[" list<pat, ",">? (","? ".." pat?)? "]";
+```
+the array pattern matches an array value by destructuring its items and matching them against a pattern list.
+
+this list is a comma separated one enclosed inside brackets.
+
+### rest pattern
+the array pattern optionally takes a rest pattern that slices the rest of the items into an array value and matches a pattern against it.
+
+the rest pattern must be the last item, it starts with a `..` followed by an optional pattern, if no pattern is given, the rest pattern always matches.
+
+the rest pattern will slice to an empty slice if there is no items left instead of failing.
+
+if no rest pattern is given, the matched array must have the same length as the pattern list.
+
+```unimap
+fn filter (v, filtered) => v: {
+	[] => [],
+	[filtered, ..let rest] => filter(rest, filtered),
+	[let item, ..let rest] => [item, ...filter(rest, filtered)],
+};
+
+let result = filter([1, 2, 3], 2); // => [1, 3]
+```
+
+## record pattern
+```gramex
+let rec_pat = "{" list<field_pat, ","> "}";
+let field_pat = field ":" pat | "[" expr "]" ":" pat | let ident (":" pat)?;
+```
+the record pattern matches a record value on the individual field level.
+
+it takes a comma separated list of field patterns enclosed inside braces, these patterns can be
+- field pattern: a field symbol followed by a `:` then the value pattern.
+- index pattern: an expression enclosed inside brackets evaluating to a field symbol, followed by a `:` then the value pattern.
+- let shorthand: a shorthand for `field: let field: pat` where the field symbol and the local share the same identifier.     
+the value pattern is optional like the let pattern.
+
+the record must have the exact fields as the field patterns, but it can have extra unmatched fields.
+
+```unimap
+symbol a, b, c;
+fn match (v, f) => v: {
+	{ a: 1, [f]: b } => 1,
+	{ a: 1, let b, c: let d } => b[d],
+	_ => 0,
+};
+
+let test1 = match({ a = 1, b = b }, b); // => 1
+let test1 = match({ a = 1, b = [1, 2, 3], c = 2 }, b); // => 3;
+let test1 = match({ a = 1 }, b); // => 0
+let test1 = match({ a = 1, b = b, c = 2 }, b); // => 1
+```
+
+## or pattern
+```gramex
+let or_pat = list<pat, "|">;
+```
+the or pattern matches any of the patterns in a `|` separated list.
+
+or pattern can not have any let pattern inside it.
+
+```unimap
+fn match (v) => v: {
+	1 | 2 | 3 => 1,
+	_ => 0,
+};
+
+let test1 = match(2); // => 1
+let test2 = match(4); // => 0
+```
 
 # execution units
