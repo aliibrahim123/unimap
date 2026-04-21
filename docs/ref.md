@@ -285,7 +285,7 @@ it is forbidden to use `_` outside a pipe chain.
 
 ```unimap
 symbol a, b, c, nested;
-fn main () => 1 |> [_, 2, 3] |> { a = _[0], b = _[1], c = { nested = _[2] } }; // => { a = 1, b = 2, c = { nested = 3 } }
+let result = 1 |> [_, 2, 3] |> { a = _[0], b = _[1], c = { nested = _[2] } }; // => { a = 1, b = 2, c = { nested = 3 } }
 ```
 
 ### grouped expression
@@ -457,7 +457,7 @@ flow expressions are the entry level of the expression heierarchy, they may be a
 ```gramex
 let pipe_expr = list<expr, "|>">;
 ```
-the pipe expression is a chain of expressions separated by the pipe operator `|>` that evaluates in a chain.
+the pipe expression is a chain of expressions separated by the pipe operator `|>` that evaluates in sequence.
 
 each expression value is pipe to the next expression in the chain till the end expression where its value is the evaluated value of the whole chain.
 
@@ -566,7 +566,7 @@ if no rest pattern is given, the matched array must have the same length as the 
 fn filter (v, filtered) => v: {
 	[] => [],
 	[filtered, ..let rest] => filter(rest, filtered),
-	[let item, ..let rest] => [item, ...filter(rest, filtered)],
+	[let item, ..let rest] => [item, ..filter(rest, filtered)],
 };
 
 let result = filter([1, 2, 3], 2); // => [1, 3]
@@ -579,9 +579,9 @@ let field_pat = field ":" pat | "[" expr "]" ":" pat | let ident (":" pat)?;
 ```
 the record pattern matches a record value on the individual field level.
 
-it takes a comma separated list of field patterns enclosed inside braces, these patterns can be
-- field pattern: a field symbol followed by a `:` then the value pattern.
-- index pattern: an expression enclosed inside brackets evaluating to a field symbol, followed by a `:` then the value pattern.
+it takes a comma separated list of field patterns enclosed inside curly braces, these patterns can be
+- direct: a field symbol followed by a `:` then the value pattern.
+- indexed: an expression enclosed inside brackets evaluating to a field symbol, followed by a `:` then the value pattern.
 - let shorthand: a shorthand for `field: let field: pat` where the field symbol and the local share the same identifier.     
 the value pattern is optional like the let pattern.
 
@@ -596,16 +596,16 @@ fn match (v, f) => v: {
 };
 
 let test1 = match({ a = 1, b = b }, b); // => 1
-let test1 = match({ a = 1, b = [1, 2, 3], c = 2 }, b); // => 3;
-let test1 = match({ a = 1 }, b); // => 0
-let test1 = match({ a = 1, b = b, c = 2 }, b); // => 1
+let test2 = match({ a = 1, b = [1, 2, 3], c = 2 }, b); // => 3;
+let test3 = match({ a = 1 }, b); // => 0
+let test4 = match({ a = 1, b = b, c = 2 }, b); // => 1
 ```
 
 ## or pattern
 ```gramex
 let or_pat = list<pat, "|">;
 ```
-the or pattern matches any of the patterns in a `|` separated list.
+the or pattern matches by any of the patterns in a `|` separated list.
 
 or pattern can not have any let pattern inside it.
 
@@ -620,3 +620,84 @@ let test2 = match(4); // => 0
 ```
 
 # execution units
+## functions
+```gramex
+let fn_decl = "fn" ident "(" lisr<ident, ","> ")" "=>" expr ";";
+```
+function declaration is a top level declaration that defines a function.
+
+it consists of a function identifier, a comma separated list of argument identifiers enclosed inside parentheses, `=>` and a body expression.
+
+functions are items called by the call expression, they take a number of arguments, evaluate the body expression with them, then return the result.
+
+they can be called recursively until the stack overflows.
+
+arguments are used inside the body expression throught the identifier expression and pattern.
+
+functions are composed of one body expression, if you want sequential execution, use the pipe operator `|>` instead.
+
+```unimap
+fn filter (v, filtered) => v: {
+	[] => [],
+	[filtered, ..let rest] => filter(rest, filtered),
+	[let item, ..let rest] => [item, ..filter(rest, filtered)],
+};
+let result = filter([1, 2, 3], 2); // => [1, 3]
+```
+
+## constants
+```gramex
+let const_decl = "let" ident "=" expr ";";
+```
+constant declaration is a top level declaration that defines a constant.
+
+it consists of a constant identifier followed by an `=` and an init expression.
+
+constants are items that stores a constant value, these values are evaluated from the init expression.
+
+they can be retrived inside the current module expressions through the identifier expression and pattern.
+
+constants are lazy evaluated, they may not evaluate, but they are evaluated only once during the program execution.
+
+```unimap
+let a = 1;
+let b = [1, 2, 3];
+fn f () => b[a];
+```
+
+## execution
+the execution in unimap is compute and print model.
+
+the runtime look in the entry module to determine the execution mode it will use.
+
+### main mode
+the default execution mode, the execution start in a function called `main` in the entry module.
+
+it is a function taking no arguments, it is called by the runtime one time and its result is printed as an output.
+
+```unimap
+symbol hello_world!;
+fn main () => hello_world!;
+```
+
+### continous mode
+the continous mode is a secondary mode if no `main` function is provided, inside it a `loop` function is called continously accumulating a value.
+
+the runtime first call an `init` function in the entry module, a zero argument function that provide the initial value of the accumulator.
+
+then it calls the `loop` function continously, each time the `loop` takes the accumulator as an argument and a 2 item array acting as`[control, acc]` tuple.
+
+- `control`: a symbol that controls the loop, it can have 2 names: `continue` to advance the loop, and `end` to stop it.
+- `acc`: the new accumulator for the next iteration, or the final output if `control` is `end`.
+
+the continous mode is an optimization for programs that run in a loop model with a huge iteration count, as the stack limit will be reached because of the very deep recursion. 
+
+```unimap
+symbol continue, end;
+// print numbers 0 to 9
+fn init () => [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+fn loop (acc) => acc: {
+	[let last] => [end, last],
+	[let cur, ..let rest] => dbg(cur) |> [continue, rest],
+};
+```
