@@ -558,7 +558,7 @@ fn resolve_expr_map(
 fn resolve_expr(expr: &ExprSrc, ctx: &mut ResolveCtx) -> Result<ExprId, Error> {
 	let kind = match &expr.kind {
 		// every Stat has a Cur expr as the first expr
-		ExprSrcKind::Cur => return Ok(0),
+		ExprSrcKind::Cur => ExprKind::Cur,
 		ExprSrcKind::Call(fun, exprs) => resolve_expr_call(fun, exprs, ctx)?,
 		ExprSrcKind::Ident(name) => match resolve_ident(name, ctx, false)? {
 			IdentResolve::Local(local) => ExprKind::Local(local),

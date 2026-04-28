@@ -153,7 +153,7 @@ pub struct Stat {
 impl Stat {
 	pub fn new() -> Self {
 		Self {
-			exprs: vec![Expr { span: Span::none(), kind: ExprKind::Cur }],
+			exprs: vec![],
 			pats: vec![Pat { span: Span::none(), kind: PatKind::Any }],
 			root_expr: 0,
 		}
@@ -251,7 +251,7 @@ pub fn exec(
 		}
 	};
 
-	Ok(final_value.display(pretty_output, &res, exec.pool))
+	Ok(final_value.display(pretty_output, &res, exec.pool) + "\n")
 }
 
 fn exec_index(
