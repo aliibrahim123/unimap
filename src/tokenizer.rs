@@ -160,8 +160,7 @@ fn update_pos_after(cur_pos: &mut (u16, u16), raw: &str) {
 		*cur_pos = (cur_pos.0 + 1, 1);
 		last_ind = ind + 1;
 	}
-	cur_pos.1 +=
-		raw[last_ind..].chars().map(|c| if c == '\t' { 4 } else { 1 }).sum::<usize>() as u16;
+	cur_pos.1 += raw[last_ind..].chars().count() as u16;
 }
 
 fn try_match_ident(src: &str, start_ind: usize) -> Option<(&str, u16)> {
@@ -242,7 +241,6 @@ pub fn tokenize<'a>(source: &'a str, src_path: &str) -> Result<Vec<Token<'a>>, E
 			'/' => match source.char_at(ind + 1) {
 				Some('/') => {
 					ind = source.find_after('\n', ind + 2).unwrap_or(source.len());
-					cur_pos = (cur_pos.0 + 1, 1);
 				}
 				Some('*') => {
 					let Some(end) = source.find_after_str("*/", ind + 2) else {
