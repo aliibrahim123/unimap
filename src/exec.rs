@@ -65,8 +65,8 @@ pub struct ExecRes {
 	pub symbols: Vec<Symbol>,
 }
 
-pub type ExprId = u16;
-pub type PatId = u16;
+pub type ExprId = u32;
+pub type PatId = u32;
 pub type LocalId = u32;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expr {
