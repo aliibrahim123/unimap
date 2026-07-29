@@ -29,3 +29,4 @@ Options:
 
 # examples
 - [MEP](https://github.com/aliibrahim123/unimap-mep): mapped expressions processor, an advance 64 bit risc cpu.
+- [unimap exaples](https://github.com/aliibrahim123/unimap-examples): game of life and calculating pie.
