@@ -539,7 +539,7 @@ fn exec_expr_map(
 			return res;
 		}
 	}
-	err!("execution error: not exhaustive patterns", (span, exec.src_path))
+	err!("execution error: non exhaustive patterns", (span, exec.src_path))
 }
 fn exec_expr(expr: ExprId, res: &ExecRes, exec: &mut Execution) -> Result<Value, Error> {
 	let Execution { pool, stack, stat, cur_value, frame_start, src_path, .. } = exec;
