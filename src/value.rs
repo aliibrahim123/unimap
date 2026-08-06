@@ -186,7 +186,7 @@ impl Value {
 					return;
 				}
 
-				buf.push('{');
+				buf.push_str(if pretty { "{" } else { "{ " });
 				for (field, value) in obj {
 					add_ident(buf, pretty, ident_level + 1);
 					match field {
@@ -204,7 +204,7 @@ impl Value {
 					buf.pop();
 				}
 				add_ident(buf, pretty, ident_level);
-				buf.push('}');
+				buf.push_str(if pretty { "}" } else { " }" });
 			}
 		}
 	}
