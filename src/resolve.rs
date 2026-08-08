@@ -524,21 +524,21 @@ fn resolve_jump_map(
 		match &pat.kind {
 			PatSrcKind::Any if fallback.is_none() => fallback = Some(expr),
 			PatSrcKind::Nb(nb) => {
-				table.insert(Field::Nb(*nb), expr);
+				table.entry(Field::Nb(*nb)).or_insert(expr);
 			}
 			PatSrcKind::Ident(symbol) => {
 				let id = ctx.scopes.items[&symbol.val].1;
-				table.insert(Field::Symbol(id), expr);
+				table.entry(Field::Symbol(id)).or_insert(expr);
 			}
 			PatSrcKind::Or(pats) => {
 				for pat in pats {
 					match &pat.kind {
 						PatSrcKind::Nb(nb) => {
-							table.insert(Field::Nb(*nb), expr);
+							table.entry(Field::Nb(*nb)).or_insert(expr);
 						}
 						PatSrcKind::Ident(symbol) => {
 							let id = ctx.scopes.items[&symbol.val].1;
-							table.insert(Field::Symbol(id), expr);
+							table.entry(Field::Symbol(id)).or_insert(expr);
 						}
 						_ => {}
 					}
