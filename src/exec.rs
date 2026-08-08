@@ -116,7 +116,7 @@ pub enum ExprKind {
 	Object(Box<[ObjectItem]>),
 	Array(Box<[ArrayItem]>),
 	#[allow(clippy::box_collection)]
-	JumpTable(ExprId, Box<HashMap<Field, ExprId>>),
+	JumpTable(ExprId, Box<HashMap<Field, ExprId>>, Option<ExprId>),
 	Map(ExprId, Box<[MapArm]>),
 	Pipe(Box<[ExprId]>),
 	Dbg(ExprId),
@@ -568,15 +568,18 @@ fn exec_expr(expr: ExprId, res: &ExecRes, exec: &mut Execution) -> Result<Value,
 		ExprKind::Call(fun, args) => exec_expr_call(*fun, args, res, exec),
 		ExprKind::Array(items) => exec_expr_array(items, res, exec),
 		ExprKind::Object(items) => exec_expr_object(items, res, exec),
-		ExprKind::JumpTable(expr, table) => {
+		ExprKind::JumpTable(expr, table, fallback) => {
 			let value = exec_expr(*expr, res, exec)?;
 			let Ok(value) = into_field(value, exec.stat.exprs[*expr as usize].span, exec) else {
+				if let Some(fallback) = fallback {
+					return exec_expr(*fallback, res, exec);
+				}
 				return err!("execution error: non exhaustive patterns", (span, exec.src_path));
 			};
-			let Some(value) = table.get(&value) else {
+			let Some(value) = table.get(&value).copied().or(*fallback) else {
 				return err!("execution error: non exhaustive patterns", (span, exec.src_path));
 			};
-			exec_expr(*value, res, exec)
+			exec_expr(value, res, exec)
 		}
 		ExprKind::Map(expr, arms) => exec_expr_map(*expr, arms, span, res, exec),
 		ExprKind::Pipe(exprs) => {

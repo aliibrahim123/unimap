@@ -318,8 +318,7 @@ fn resolve_field(field: &FieldKind, ctx: &ResolveCtx) -> Result<Field, Error> {
 	}
 	Ok(Field::Symbol(field_id))
 }
-fn try_resolve_symbol(name: Option<&Ident>, scopes: &Scopes) -> Option<ItemId> {
-	let name = name?;
+fn try_resolve_symbol(name: &Ident, scopes: &Scopes) -> Option<ItemId> {
 	let Some((ItemType::Symbol, id)) = scopes.items.get(&name.val) else { return None };
 	scopes.resolve_local(name).is_none().then_some(*id)
 }
@@ -484,7 +483,7 @@ fn resolve_expr_field(
 	// is enum.var
 	if let FieldKind::Ident(field) = field
 		&& let Some(name) = expr.as_ident()
-		&& let Some(id) = try_resolve_symbol(Some(name), scopes)
+		&& let Some(id) = try_resolve_symbol(name, scopes)
 		&& let Some(map) = var_map.get(&id)
 	{
 		let Some(id) = map.get(&field.val) else {
@@ -515,26 +514,57 @@ fn resolve_expr_obj(items_src: &[ObjectItemSrc], ctx: &mut ResolveCtx) -> Result
 	}
 	Ok(ExprKind::Object(items.into_boxed_slice()))
 }
+fn resolve_jump_map(
+	expr: ExprId, arms_src: &[MapArmSrc], ctx: &mut ResolveCtx,
+) -> Result<ExprKind, Error> {
+	let mut table = HashMap::with_capacity(arms_src.len());
+	let mut fallback = None;
+	for MapArmSrc { map, pat } in arms_src {
+		let expr = resolve_expr(map, ctx)?;
+		match &pat.kind {
+			PatSrcKind::Any if fallback.is_none() => fallback = Some(expr),
+			PatSrcKind::Nb(nb) => {
+				table.insert(Field::Nb(*nb), expr);
+			}
+			PatSrcKind::Ident(symbol) => {
+				let id = ctx.scopes.items[&symbol.val].1;
+				table.insert(Field::Symbol(id), expr);
+			}
+			PatSrcKind::Or(pats) => {
+				for pat in pats {
+					match &pat.kind {
+						PatSrcKind::Nb(nb) => {
+							table.insert(Field::Nb(*nb), expr);
+						}
+						PatSrcKind::Ident(symbol) => {
+							let id = ctx.scopes.items[&symbol.val].1;
+							table.insert(Field::Symbol(id), expr);
+						}
+						_ => {}
+					}
+				}
+			}
+			_ => {}
+		};
+	}
+	Ok(ExprKind::JumpTable(expr, Box::new(table), fallback))
+}
 fn resolve_expr_map(
 	expr: &ExprSrc, arms_src: &[MapArmSrc], ctx: &mut ResolveCtx,
 ) -> Result<ExprKind, Error> {
 	let expr = resolve_expr(expr, ctx)?;
-	let is_simple = |pat: &PatSrc| {
-		try_resolve_symbol(pat.as_ident(), &ctx.scopes).is_some()
-			|| matches!(pat.kind, PatSrcKind::Nb(_))
-	};
-	// jump table optimization
-	if arms_src.iter().all(|arm| is_simple(&arm.pat)) {
-		let mut table = HashMap::with_capacity(arms_src.len());
-		for MapArmSrc { map, pat } in arms_src {
-			let pat = match pat.kind {
-				PatSrcKind::Nb(nb) => Field::Nb(nb),
-				_ => Field::Symbol(ctx.scopes.items[&pat.as_ident().unwrap().val].1),
-			};
-			let expr = resolve_expr(map, ctx)?;
-			table.insert(pat, expr);
+	fn is_simple(ctx: &ResolveCtx, pat: &PatSrc) -> bool {
+		match &pat.kind {
+			PatSrcKind::Nb(_) | PatSrcKind::Any => true,
+			PatSrcKind::Ident(name) => try_resolve_symbol(name, &ctx.scopes).is_some(),
+			PatSrcKind::Or(pats) => pats.iter().all(|pat| is_simple(ctx, pat)),
+			_ => false,
 		}
-		Ok(ExprKind::JumpTable(expr, Box::new(table)))
+	}
+
+	// jump table optimization
+	if arms_src.iter().all(|arm| is_simple(ctx, &arm.pat)) {
+		resolve_jump_map(expr, arms_src, ctx)
 	}
 	// normal map
 	else {
